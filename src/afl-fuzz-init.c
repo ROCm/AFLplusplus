@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "cmplog.h"
+#include <stdio.h>
 
 #ifdef HAVE_AFFINITY
 

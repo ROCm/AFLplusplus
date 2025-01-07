@@ -517,6 +517,11 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   /* IJON space allocation is handled by normal resize logic based on target's
    * reported size */
   fsrv->real_map_size = fsrv->map_size;
+  fsrv->shadow_size = SHADOW_TABLE_ALLIGNED_SIZE;
+  if (fsrv->shadow_size < SHADOW_TABLE_ALLIGNED_MIN_SIZE) {
+    BADF("Shadow table size: %u too small. Did you set it properly?\n",
+         SHADOW_TABLE_ALLIGNED_SIZE);
+  }
   fsrv->use_fauxsrv = false;
   fsrv->last_run_timed_out = false;
   fsrv->debug = false;
@@ -2533,8 +2538,9 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
 #ifdef __linux__
     if (likely(!fsrv->nyx_mode)) {
 
-      memset(fsrv->trace_bits, 0, fsrv->map_size);
-      MEM_BARRIER();
+    memset(fsrv->trace_bits, 0, fsrv->map_size);
+    memset(fsrv->shadow_bits, 0, fsrv->shadow_size);
+    MEM_BARRIER();
 
     }
 

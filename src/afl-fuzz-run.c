@@ -604,7 +604,8 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
 #ifdef INTROSPECTION
     if (unlikely(!q->bitsmap_size)) { q->bitsmap_size = afl->bitsmap_size; }
 #endif
-
+    cmp_and_merge_shadow_bits(afl->fsrv.shadow_bits, afl->shadow_bits,
+                              afl->fsrv.shadow_size);
     classify_counts(&afl->fsrv);
     cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
 

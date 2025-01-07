@@ -316,9 +316,31 @@ endif
 
 CXXFLAGS          ?= -O3 -funroll-loops -fPIC
 # -D_FORTIFY_SOURCE=1
+
+# GlobalISel matcher-table coverage fingerprint inputs.
+#   GIM_HEADER  - GIM_/GIR_ enumerator declarations.
+#   GIM_IMPL    - executeMatchTable() switch with one `case` per opcode that
+#                 has its own body.  Used to identify the matcher's dispatch
+#                 switch in target-specific InstructionSelector TUs where
+#                 executeMatchTable is inlined.
+GIM_HEADER := $(FUZZING_HOME)/$(LLVM)/llvm/include/llvm/CodeGen/GlobalISel/GIMatchTableExecutor.h
+GIM_IMPL   := $(FUZZING_HOME)/$(LLVM)/llvm/include/llvm/CodeGen/GlobalISel/GIMatchTableExecutorImpl.h
+
+ifeq (,$(wildcard $(GIM_HEADER)))
+  $(error GlobalISel matcher header not found at "$(GIM_HEADER)". Did you source env.sh? FUZZING_HOME="$(FUZZING_HOME)" LLVM="$(LLVM)")
+endif
+ifeq (,$(wildcard $(GIM_IMPL)))
+  $(error GlobalISel matcher impl not found at "$(GIM_IMPL)". Did you source env.sh? FUZZING_HOME="$(FUZZING_HOME)" LLVM="$(LLVM)")
+endif
+
+MATCHER_OPCODES_COUNT := $(shell grep -cE '^[[:space:]]*GI[RM]_[A-Za-z0-9_]+[[:space:]]*,' $(GIM_HEADER))
+MATCHER_SWITCH_CASES  := $(shell grep -cE '^[[:space:]]*case GI[RM]_[A-Za-z0-9_]+[[:space:]]*:' $(GIM_IMPL))
+
 override CXXFLAGS += -Wall -g -I ./include/ \
                      -DVERSION=\"$(VERSION)\" -Wno-variadic-macros -Wno-deprecated-copy-with-dtor \
-                     -DLLVM_MINOR=$(LLVM_MINOR) -DLLVM_MAJOR=$(LLVM_MAJOR)
+                     -DLLVM_MINOR=$(LLVM_MINOR) -DLLVM_MAJOR=$(LLVM_MAJOR) \
+                     -DMATCHER_OPCODES_COUNT=$(MATCHER_OPCODES_COUNT) \
+                     -DMATCHER_SWITCH_CASES=$(MATCHER_SWITCH_CASES)
 
 ifdef IOS_SDK_PATH
   override CXXFLAGS += -isysroot $(IOS_SDK_PATH)

@@ -174,10 +174,13 @@ extern ssize_t _kern_write(int fd, off_t pos, const void *buffer,
 
 char *strcasestr(const char *haystack, const char *needle);
 
+static u8  __afl_shadow_table_initial[MAP_INITIAL_SIZE];
 static u8  __afl_area_initial[MAP_INITIAL_SIZE];
 static u8 *__afl_area_ptr_dummy = __afl_area_initial;
 static u8 *__afl_area_ptr_backup = __afl_area_initial;
 
+int        __afl_shadow_table_size;
+u8        *__afl_shadow_table_ptr = __afl_shadow_table_initial;
 u8        *__afl_area_ptr = __afl_area_initial;
 u8        *__afl_dictionary;
 u32       *__afl_child_sync = NULL;
@@ -944,6 +947,65 @@ static void __afl_map_shm(void) {
 
   }
 
+  id_str = getenv(SHADOW_SHM_ENV_VAR);
+  __afl_shadow_table_size = SHADOW_TABLE_ALLIGNED_SIZE;
+  if (__afl_shadow_table_size < SHADOW_TABLE_ALLIGNED_MIN_SIZE) {
+    fprintf(stderr,
+            "WARN: __afl_shadow_table_size %d too small. Did you set it "
+            "properly?\n",
+            __afl_shadow_table_size);
+  }
+
+  if (id_str) {
+#ifdef USEMMAP
+    const char    *shm_file_path = id_str;
+    int            shm_fd = -1;
+    unsigned char *shm_base = NULL;
+
+    /* create the shared memory segment as if it was a file */
+    shm_fd = shm_open(shm_file_path, O_RDWR, DEFAULT_PERMISSION);
+    if (shm_fd == -1) {
+      fprintf(stderr, "shm_open() failed\n");
+      send_forkserver_error(FS_ERROR_SHM_OPEN);
+      exit(1);
+    }
+
+    shm_base = mmap(0, __afl_shadow_table_size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, shm_fd, 0);
+    close(shm_fd);
+    shm_fd = -1;
+
+    if (shm_base == MAP_FAILED) {
+      fprintf(stderr, "mmap() failed\n");
+      send_forkserver_error(FS_ERROR_SHM_OPEN);
+      exit(2);
+    }
+
+    __afl_shadow_table_ptr = shm_base;
+#else
+    u32 shm_id = atoi(id_str);
+
+    __afl_shadow_table_ptr = (u8 *)shmat(shm_id, NULL, 0);
+
+    /* Whooooops. */
+
+    if (!__afl_shadow_table_ptr || __afl_shadow_table_ptr == (void *)-1) {
+      perror("shmat for shadow map");
+      send_forkserver_error(FS_ERROR_SHM_OPEN);
+      _exit(1);
+    }
+
+#endif
+  }
+
+  if (__afl_debug) {
+    fprintf(stderr,
+            "DEBUG: (3) id_str %s, __afl_shadow_table_ptr %p, "
+            "__afl_shadow_table_size %d.\n",
+            id_str == NULL ? "<null>" : id_str, __afl_shadow_table_ptr,
+            __afl_shadow_table_size);
+  }
+
 #ifdef __AFL_CODE_COVERAGE
   char *pcmap_id_str = getenv("__AFL_PCMAP_SHM_ID");
 
@@ -1064,7 +1126,22 @@ static void __afl_unmap_shm(void) {
 
     __afl_cmp_map = NULL;
     __afl_cmp_map_backup = NULL;
+  }
 
+  id_str = getenv(SHADOW_SHM_ENV_VAR);
+
+  if (id_str) {
+#ifdef USEMMAP
+
+    munmap((void *)__afl_shadow_table_ptr, __afl_shadow_table_size);
+
+#else
+
+    shmdt((void *)__afl_shadow_table_ptr);
+
+#endif
+
+    __afl_shadow_table_ptr = NULL;
   }
 
   __afl_already_initialized_shm = 0;
@@ -1448,6 +1525,11 @@ int __afl_persistent_loop(unsigned int max_cnt) {
        before the loop. */
 
     memset_noasan(__afl_area_ptr, 0, __afl_set_map_size);
+    if (__afl_shadow_table_ptr && __afl_shadow_table_size) {
+
+      memset_noasan(__afl_shadow_table_ptr, 0, __afl_shadow_table_size);
+
+    }
     __afl_area_ptr[0] = 1;
     memset_noasan(__afl_prev_loc, 0, NGRAM_SIZE_MAX * sizeof(PREV_LOC_T));
 

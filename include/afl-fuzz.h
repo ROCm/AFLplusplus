@@ -566,6 +566,7 @@ typedef struct afl_state {
 
   afl_forkserver_t fsrv;
   sharedmem_t      shm;
+  sharedmem_t      shadow_shm;
   sharedmem_t     *shm_fuzz;
   afl_env_vars_t   afl_env;
 #ifdef __AFL_CODE_COVERAGE
@@ -683,6 +684,10 @@ typedef struct afl_state {
   u8 *virgin_bits,                      /* Regions yet untouched by fuzzing */
       *virgin_tmout,                    /* Bits we haven't seen in tmouts   */
       *virgin_crash;                    /* Bits we haven't seen in crashes  */
+
+  u8 *shadow_bits;                      /* Regions uncoverred in MatcherTable */
+  u8  use_shadow_bits;                  /* Whether shadow bits can determine if 
+                                           the input is interesting. */
 
   double *alias_probability;            /* alias weighted probabilities     */
   u32    *alias_table;                /* alias weighted random lookup table */
@@ -1299,8 +1304,9 @@ void update_bitmap_rescore(afl_state_t *, struct queue_entry *, u32);
 
 /* Bitmap */
 
-void write_bitmap(afl_state_t *);
+void write_bitmaps(afl_state_t *);
 u32  count_bits(afl_state_t *, u8 *);
+u32  count_shadow_bits(u8 *mem, u32 size);
 u32  count_bytes(afl_state_t *, u8 *);
 u32  count_non_255_bytes(afl_state_t *, u8 *);
 void simplify_trace(afl_state_t *, u8 *);
@@ -1316,6 +1322,7 @@ u8 *describe_op(afl_state_t *, u8, size_t);
 #endif
 u8 save_if_interesting(afl_state_t *, void *, u32, u8);
 u8 has_new_bits(afl_state_t *, u8 *);
+u8 cmp_and_merge_shadow_bits(u8 *new_, u8 *global, u32 size);
 #ifndef AFL_SHOWMAP
 void classify_counts(afl_forkserver_t *);
 #endif
@@ -1344,8 +1351,8 @@ void destroy_extras(afl_state_t *);
 
 void load_stats_file(afl_state_t *);
 void write_setup_file(afl_state_t *, u32, char **);
-void write_stats_file(afl_state_t *, u32, double, double, double);
-void maybe_update_plot_file(afl_state_t *, u32, double, double);
+void write_stats_file(afl_state_t *, u32, double, double, double, double);
+void maybe_update_plot_file(afl_state_t *, u32, double, double, double);
 void write_queue_stats(afl_state_t *);
 void make_space_for_stats();
 void show_stats(afl_state_t *);

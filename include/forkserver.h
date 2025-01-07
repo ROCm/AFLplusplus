@@ -107,6 +107,7 @@ typedef struct afl_forkserver {
   /* a program that includes afl-forkserver needs to define these */
 
   u8 *trace_bits;                       /* SHM with instrumentation bitmap  */
+  u8 *shadow_bits;                      /* SHM with instrumentation bitmap for MatcherTable */
 
   s32 fsrv_pid,                         /* PID of the fork server           */
       child_pid,                        /* PID of the fuzzed program        */
@@ -124,6 +125,7 @@ typedef struct afl_forkserver {
   u32 init_tmout;                       /* Configurable init timeout (ms)   */
   u32 map_size;                         /* map size used by the target      */
   u32 real_map_size;                    /* real map size, unaligned         */
+  u32 shadow_size;                      /* Shadow map size to trace MatcherTable */
   u32 snapshot;                         /* is snapshot feature used         */
   u64 mem_limit;                        /* Memory cap for child (MB)        */
 

@@ -195,7 +195,7 @@
 /* Number of calibration cycles per every new test case (and for test
    cases that show variable behavior): */
 
-#define CAL_CYCLES_FAST 3U
+#define CAL_CYCLES_FAST 3U //TODO: IRFuzzer set this value to 1
 #define CAL_CYCLES 7U
 #define CAL_CYCLES_LONG 12U
 
@@ -430,6 +430,8 @@
 /* Environment variable used to pass SHM ID to the called program. */
 
 #define SHM_ENV_VAR "__AFL_SHM_ID"
+#define SHADOW_SHM_ENV_VAR "__AFL_SHADOW_SHM_ID"
+#define SHADOW_SHM_SIZE_VAR "__AFL_SHADOW_SHM_SIZE"
 
 /* Environment variable used to pass shared memory fuzz map id
 and the mapping size to the called program. */
@@ -586,6 +588,15 @@ We add 4 byte for one u32 length field. */
 /* Maximum mutations on a string */
 
 #define AFL_TXT_STRING_MAX_MUTATIONS 6
+
+#define MATCHER_TABLE_SIZE_ENV "MATCHER_TABLE_SIZE"
+#define MATCHER_TABLE_BITSIZE \
+  atoi(getenv(MATCHER_TABLE_SIZE_ENV) ? getenv(MATCHER_TABLE_SIZE_ENV) : "256")
+#define SHADOW_TABLE_ALLIGNED_SIZE (((MATCHER_TABLE_BITSIZE + 7) >> 3))
+// We can assume matcher table should be at least 1024 * 8 = 8192 long, since
+// most architecture are pretty complicated. If it is too small, chances are
+// that we forget to set the table size. We will raise a warning about it.
+#define SHADOW_TABLE_ALLIGNED_MIN_SIZE 1024
 
 #endif                                                  /* ! _HAVE_CONFIG_H */
 

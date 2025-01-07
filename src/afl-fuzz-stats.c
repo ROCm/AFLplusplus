@@ -322,7 +322,7 @@ void load_stats_file(afl_state_t *afl) {
 /* Update stats file for unattended monitoring. */
 
 void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
-                      double stability, double eps) {
+                      double shadow_cvg, double stability, double eps) {
 
 #ifndef __HAIKU__
   struct rusage rus;
@@ -345,7 +345,7 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
   /* Keep last values in case we're called from another context
      where exec/sec stats and such are not readily available. */
-
+  /// TODO: Also update last shadow coverage.
   if (!bitmap_cvg && !stability && !eps) {
 
     bitmap_cvg = afl->last_bitmap_cvg;
@@ -406,6 +406,7 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
           "pending_total     : %u\n"
           "stability         : %0.02f%%\n"
           "bitmap_cvg        : %0.02f%%\n"
+          "shadow_cvg        : %0.03f%%\n"
           "saved_crashes     : %llu\n"
           "saved_hangs       : %llu\n"
           "total_tmout       : %llu\n"
@@ -446,11 +447,12 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
           afl->last_avg_execs_saved, afl->queued_items, afl->queued_favored,
           afl->queued_discovered, afl->queued_imported, afl->queued_variable,
           afl->max_depth, afl->current_entry, afl->pending_favored,
-          afl->pending_not_fuzzed, stability, bitmap_cvg, afl->saved_crashes,
+          afl->pending_not_fuzzed, stability, bitmap_cvg, shadow_cvg, afl->saved_crashes,
           afl->saved_hangs, afl->total_tmouts, afl->last_find_time / 1000,
           afl->last_crash_time / 1000, afl->last_hang_time / 1000,
           afl->fsrv.total_execs - afl->last_crash_execs, afl->fsrv.exec_tmout,
           afl->slowest_exec_ms,
+  
 #ifndef __HAIKU__
   #ifdef __APPLE__
           (unsigned long int)(rus.ru_maxrss >> 20),
@@ -565,7 +567,7 @@ void write_queue_stats(afl_state_t *afl) {
 /* Update the plot file if there is a reason to. */
 
 void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
-                            double eps) {
+                            double shadow_cvg, double eps) {
 
   if (unlikely(!afl->force_ui_update &&
                (afl->stop_soon ||
@@ -579,7 +581,7 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
                  afl->plot_prev_md == afl->max_depth &&
                  afl->plot_prev_ed == afl->fsrv.total_execs) ||
                 !afl->queue_cycle ||
-                get_cur_time() - afl->start_time <= 60000))) {
+                 get_cur_time() == afl->start_time))) {
 
     return;
 
@@ -602,14 +604,14 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
      execs_per_sec, edges_found */
 
   fprintf(afl->fsrv.plot_file,
-          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %llu, "
-          "%u, %llu, %u",
+          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %0.03f%%, %llu, %llu, %u, "
+          "%0.02f, %llu, %u, %llu, %u",
           ((afl->prev_run_time + get_cur_time() - afl->start_time) / 1000),
           afl->queue_cycle - 1, afl->current_entry, afl->queued_items,
-          afl->pending_not_fuzzed, afl->pending_favored, bitmap_cvg,
+          afl->pending_not_fuzzed, afl->pending_favored, bitmap_cvg, shadow_cvg,
           afl->saved_crashes, afl->saved_hangs, afl->max_depth, eps,
           afl->plot_prev_ed, t_bytes, afl->total_crashes,
-          (u32)afl->san_binary_length);                    /* ignore errors */
+          (u32)afl->san_binary_length); /* ignore errors */
 
   for (u32 i = 0; i < afl->san_binary_length; i++) {
 
@@ -620,7 +622,6 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
   fprintf(afl->fsrv.plot_file, "\n");
 
   fflush(afl->fsrv.plot_file);
-
 }
 
 /* Log deterministic stage efficiency */
@@ -710,10 +711,10 @@ void show_stats(afl_state_t *afl) {
 
 void show_stats_normal(afl_state_t *afl) {
 
-  double t_byte_ratio, stab_ratio;
+  double t_byte_ratio, s_bit_ratio, stab_ratio;
 
   u64 cur_ms;
-  u32 t_bytes, t_bits;
+  u32 t_bytes, t_bits, s_bits;
 
   static u8 banner[128];
   u32       banner_len, banner_pad;
@@ -810,6 +811,10 @@ void show_stats_normal(afl_state_t *afl) {
   t_bytes = count_non_255_bytes(afl, afl->virgin_bits);
   t_byte_ratio = ((double)t_bytes * 100) / afl->fsrv.real_map_size;
 
+  u32 shadow_size = afl->fsrv.shadow_size;
+  s_bits = count_shadow_bits(afl->shadow_bits, shadow_size);
+  s_bit_ratio = 100.0 - ((double)s_bits * 100) / (shadow_size << 3);
+
   if (unlikely(t_bytes > afl->fsrv.real_map_size)) {
 
     if (unlikely(!afl->afl_env.afl_ignore_problems)) {
@@ -844,10 +849,10 @@ void show_stats_normal(afl_state_t *afl) {
                                        afl->stats_file_update_freq_msecs))) {
 
     afl->stats_last_stats_ms = cur_ms;
-    write_stats_file(afl, t_bytes, t_byte_ratio, stab_ratio,
+    write_stats_file(afl, t_bytes, t_byte_ratio, s_bit_ratio, stab_ratio,
                      afl->stats_avg_exec);
     save_auto(afl);
-    write_bitmap(afl);
+    write_bitmaps(afl);
 
   }
 
@@ -870,7 +875,7 @@ void show_stats_normal(afl_state_t *afl) {
                cur_ms - afl->stats_last_plot_ms > PLOT_UPDATE_SEC * 1000)) {
 
     afl->stats_last_plot_ms = cur_ms;
-    maybe_update_plot_file(afl, t_bytes, t_byte_ratio, afl->stats_avg_exec);
+    maybe_update_plot_file(afl, t_bytes, t_byte_ratio, s_bit_ratio, afl->stats_avg_exec);
 
   }
 
@@ -1142,9 +1147,9 @@ void show_stats_normal(afl_state_t *afl) {
 
   SAYF(bV bSTOP "  now processing : " cRST "%-18s " bSTG bV bSTOP, tmp);
 
-  sprintf(tmp, "%0.02f%% / %0.02f%%",
-          ((double)afl->queue_cur->bitmap_size) * 100 / afl->fsrv.real_map_size,
-          t_byte_ratio);
+  sprintf(tmp, "%0.02f%% / %0.03f%%",
+          //((double)afl->queue_cur->bitmap_size) * 100 / afl->fsrv.real_map_size,
+          t_byte_ratio, s_bit_ratio);
 
   SAYF("    map density : %s%-19s" bSTG bV "\n",
        t_byte_ratio > 70
@@ -1536,10 +1541,10 @@ void show_stats_normal(afl_state_t *afl) {
 
 void show_stats_pizza(afl_state_t *afl) {
 
-  double t_byte_ratio, stab_ratio;
+  double t_byte_ratio, stab_ratio, s_bit_ratio;
 
   u64 cur_ms;
-  u32 t_bytes, t_bits;
+  u32 t_bytes, t_bits, s_bits;
 
   static u8 banner[128];
   u32       banner_len, banner_pad;
@@ -1636,6 +1641,10 @@ void show_stats_pizza(afl_state_t *afl) {
   t_bytes = count_non_255_bytes(afl, afl->virgin_bits);
   t_byte_ratio = ((double)t_bytes * 100) / afl->fsrv.real_map_size;
 
+  u32 shadow_size = afl->fsrv.shadow_size;
+  s_bits = count_shadow_bits(afl->shadow_bits, shadow_size);
+  s_bit_ratio = 100.0 - ((double)s_bits * 100) / (shadow_size << 3);
+
   if (unlikely(t_bytes > afl->fsrv.real_map_size)) {
 
     if (unlikely(!afl->afl_env.afl_ignore_problems)) {
@@ -1665,10 +1674,10 @@ void show_stats_pizza(afl_state_t *afl) {
                 cur_ms - afl->stats_last_stats_ms > STATS_UPDATE_SEC * 1000))) {
 
     afl->stats_last_stats_ms = cur_ms;
-    write_stats_file(afl, t_bytes, t_byte_ratio, stab_ratio,
+    write_stats_file(afl, t_bytes, t_byte_ratio, s_bit_ratio, stab_ratio,
                      afl->stats_avg_exec);
     save_auto(afl);
-    write_bitmap(afl);
+    write_bitmaps(afl);
 
   }
 
@@ -1695,7 +1704,7 @@ void show_stats_pizza(afl_state_t *afl) {
                cur_ms - afl->stats_last_plot_ms > PLOT_UPDATE_SEC * 1000)) {
 
     afl->stats_last_plot_ms = cur_ms;
-    maybe_update_plot_file(afl, t_bytes, t_byte_ratio, afl->stats_avg_exec);
+    maybe_update_plot_file(afl, t_bytes, t_byte_ratio, s_bit_ratio, afl->stats_avg_exec);
 
   }
 
