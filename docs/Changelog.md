@@ -3,7 +3,25 @@
   This is the list of all noteworthy changes made in every public
   release of the tool. See README.md for the general instruction manual.
 
-### Version ++4.22a (dev)
+
+### Version ++4.31a (dev)
+  - afl-fuzz:
+    - Python 3.13+ support
+    - loose file and shared memory permissions on Android and iPhone
+    - splicing is now DISABLED by default because research showed
+      it is counterproductive. New command line parameter `-u` to enable
+      it. Splicing is auto-enabled if two cycles without finds happen.
+  - afl-cc:
+    - -fsanitize=fuzzer now inserts libAFLDriver.a addtionally early to help
+      compiling if LLVMFuzzerTestOneOnput is in an .a archive
+    - added __sanitizer_weak_hook_* functions (in case that is helpful in
+      weird setups)
+    - fix bug with large map sizes when multiple libraries are loaded after
+      the shared memory was obtained.
+
+
+### Version ++4.30c (release)
+  ! afl-gcc and afl-clang funcionality is now removed !
   - afl-fuzz:
     - fastresume feature added. if you abort fuzzing and resume fuzzing
       with `-i -` or `AFL_AUTORESUME=1` and the target binary has not changed
@@ -16,6 +34,8 @@
     - because of bad math and undefined behaviour fixes we have to change
       the CMPLOG map. **YOU NEED TO RECOMPILE CMPLOG TARGETS**
     - fixed custom_post_process for calibration
+    - fixes for AFL_EXIT_ON_TIME and AFL_EXIT_WHEN_DONE, changed behaviour of
+      AFL_EXIT_WHEN_DONE to finish when really done :-)
   - frida_mode:
     - AFL_FRIDA_PERSISTENT_ADDR can now be be any reachable address not just
       a function entry
@@ -26,6 +46,7 @@
       @CowBoy4mH3LL
   - unicorn_mode:
     - fix install and forkserver (thanks aarnav!)
+    - pin unicorn version
   - nyx_mode:
     - bugfixes
   - custom mutators:
@@ -35,10 +56,14 @@
     - new runtime (!) variable: `AFL_OLD_FORKSERVER` to use the old vanilla
       AFL type forkserver. Useful for symcc/symqemu/nautilus/etc. with
       AFL_LLVM_INSTRUMENT=CLASSIC
+    - new compile time variable: `AFL_OPT_LEVEL` to set a specific optimization
+      level, default is `3`
+    - correctly explain how to get the correct map size for large targets
+    - small fix for weird LLVM defines in redhat
   - code formatting updated to llvm 18
   - improved custom_mutators/aflpp/standalone/aflpp-standalone
   - added custom_mutators/autotokens/standalone/autotokens-standalone
-
+  - AFL++ headers are now installed to $PREFIX/include/afl
 
 ### Version ++4.21c (release)
   * afl-fuzz

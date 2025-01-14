@@ -24,7 +24,6 @@ To select the different instrumentation modes, use one of the following options:
   - Use the `AFL_CC_COMPILER` environment variable with `MODE`. To select
     `MODE`, use one of the following values:
 
-    - `GCC` (afl-gcc/afl-g++)
     - `GCC_PLUGIN` (afl-g*-fast)
     - `LLVM` (afl-clang-fast*)
     - `LTO` (afl-clang-lto*).
@@ -45,13 +44,9 @@ fairly broad use of environment variables instead:
           make
     ```
 
-  - Setting `AFL_AS`, `AFL_CC`, and `AFL_CXX` lets you use alternate downstream
-    compilation tools, rather than the default 'as', 'clang', or 'gcc' binaries
+  - Setting `AFL_CC`, and `AFL_CXX` lets you use alternate downstream
+    compilation tools, rather than the default 'clang', or 'gcc' binaries
     in your `$PATH`.
-
-  - If you are a weird person that wants to compile and instrument asm text
-    files, then use the `AFL_AS_FORCE_INSTRUMENT` variable:
-    `AFL_AS_FORCE_INSTRUMENT=1 afl-gcc foo.s -o foo`
 
   - Most AFL tools do not print any output if stdout/stderr are redirected. If
     you want to get the output into a file, then set the `AFL_DEBUG` environment
@@ -63,6 +58,9 @@ fairly broad use of environment variables instead:
     more thorough code analysis and can spew out additional warnings. To disable
     optimizations, set `AFL_DONT_OPTIMIZE`. However, if `-O...` and/or
     `-fno-unroll-loops` are set, these are not overridden.
+
+  - The optimization level can also be set with `AFL_OPT_LEVEL`, e.g.
+    `AFL_OPT_LEVEL=z` for `-Oz`, default is `3`
 
   - Setting `AFL_HARDEN` automatically adds code hardening options when invoking
     the downstream compiler. This currently includes `-D_FORTIFY_SOURCE=2` and
@@ -80,17 +78,13 @@ fairly broad use of environment variables instead:
     Setting `AFL_INST_RATIO` to 0 is a valid choice. This will instrument only
     the transitions between function entry points, but not individual branches.
 
-    Note that this is an outdated variable. A few instances (e.g., afl-gcc)
-    still support these, but state-of-the-art (e.g., LLVM LTO and LLVM PCGUARD)
-    do not need this.
+    Note that this is an outdated variable. Only LLVM CLASSIC pass can use this.
 
   - `AFL_NO_BUILTIN` causes the compiler to generate code suitable for use with
     libtokencap.so (but perhaps running a bit slower than without the flag).
 
-  - `AFL_PATH` can be used to point afl-gcc to an alternate location of afl-as.
-    One possible use of this is utils/clang_asm_normalize/, which lets you
-    instrument hand-written assembly when compiling clang code by plugging a
-    normalizer into the chain. (There is no equivalent feature for GCC.)
+  - `AFL_PATH` can be used to point a directory that contains LLVM/GCC plugins
+    for AFL++, AFL++'s runtime objects and QEMU/Frida support files.
 
   - Setting `AFL_QUIET` will prevent afl-as and afl-cc banners from being
     displayed during compilation, in case you find them distracting.
@@ -101,6 +95,7 @@ fairly broad use of environment variables instead:
       detection)
     - `AFL_USE_CFISAN=1` - activates the Control Flow Integrity sanitizer (e.g.
       type confusion vulnerabilities)
+    - `AFL_CFISAN_VERBOSE=1` - outputs detailed information when control flow integrity violations occur, instead of simply terminating with "Illegal Instruction"
     - `AFL_USE_LSAN` - activates the leak sanitizer. To perform a leak check
       within your program at a certain point (such as at the end of an
       `__AFL_LOOP()`), you can run the macro  `__AFL_LEAK_CHECK();` which will
@@ -111,6 +106,9 @@ fairly broad use of environment variables instead:
     - `AFL_USE_TSAN=1` - activates the thread sanitizer to find thread race
       conditions
     - `AFL_USE_UBSAN=1` - activates the undefined behavior sanitizer
+    - `AFL_UBSAN_VERBOSE=1` - outputs detailed diagnostic information when undefined behavior is detected, instead of simply terminating with "Illegal Instruction"
+
+    - Note: both `AFL_CFISAN_VERBOSE=1` and `AFL_UBSAN_VERBOSE=1` are disabled by default as verbose output can significantly slow down fuzzing performance. Use these options only during debugging or when additional crash diagnostics are required
 
   - `TMPDIR` is used by afl-as for temporary files; if this variable is not set,
     the tool defaults to /tmp.
@@ -323,6 +321,11 @@ mode.
     [instrumentation/README.instrument_list.md](../instrumentation/README.instrument_list.md)
     for more information.
 
+    Setting `AFL_GCC_DISABLE_VERSION_CHECK=1` will disable the GCC plugin 
+    version check if the target GCC plugin differs from the system-installed
+    version, resolving issues caused by version mismatches between GCC and 
+    the plugin. 
+
     Setting `AFL_GCC_OUT_OF_LINE=1` will instruct afl-gcc-fast to instrument the
     code with calls to an injected subroutine instead of the much more efficient
     inline instrumentation.
@@ -424,9 +427,8 @@ checks or alter some of the more exotic semantics of the tool:
     types of automated jobs.
 
   - `AFL_EXIT_WHEN_DONE` causes afl-fuzz to terminate when all existing paths
-    have been fuzzed and there were no new finds for a while. This would be
-    normally indicated by the cycle counter in the UI turning green. May be
-    convenient for some types of automated jobs.
+    have been fuzzed and there were no new finds for a while. This is basically
+    when the fuzzing state says `state: finished`
 
   - Setting `AFL_EXPAND_HAVOC_NOW` will start in the extended havoc mode that
     includes costly mutations. afl-fuzz automatically enables this mode when

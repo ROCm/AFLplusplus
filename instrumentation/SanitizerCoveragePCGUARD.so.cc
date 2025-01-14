@@ -23,6 +23,10 @@
   #include "llvm/IR/CFG.h"
 #endif
 #include "llvm/IR/Constant.h"
+#if LLVM_VERSION_MAJOR >= 20
+  #include "llvm/IR/Constants.h"
+  #include "llvm/IR/ValueSymbolTable.h"
+#endif
 #include "llvm/IR/DataLayout.h"
 #if LLVM_VERSION_MAJOR < 15
   #include "llvm/IR/DebugInfo.h"
@@ -306,7 +310,7 @@ Function *ModuleSanitizerCoverageAFL::CreateInitCallsForSections(
   Type     *PtrTy = PointerType::getUnqual(Ty);
   std::tie(CtorFunc, std::ignore) = createSanitizerCtorAndInitFunctions(
       M, CtorName, InitFunctionName, {PtrTy, PtrTy}, {SecStart, SecEnd});
-  assert(CtorFunc->getName() == CtorName);
+  // assert(CtorFunc->getName() == CtorName);
 
   if (TargetTriple.supportsCOMDAT()) {
 

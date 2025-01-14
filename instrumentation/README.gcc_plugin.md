@@ -21,7 +21,7 @@ TL;DR:
 
 The code in this directory allows to instrument programs for AFL++ using true
 compiler-level instrumentation, instead of the more crude assembly-level
-rewriting approach taken by afl-gcc and afl-clang. This has several interesting
+rewriting approach taken by obsolete afl-gcc and afl-clang. This has several interesting
 properties:
 
 - The compiler can make many optimizations that are hard to pull off when
@@ -40,10 +40,6 @@ properties:
   will *not* work with LLVM (see [README.llvm.md](README.llvm.md) for an
   alternative).
 
-Once this implementation is shown to be sufficiently robust and portable, it
-will probably replace afl-gcc. For now, it can be built separately and co-exists
-with the original code.
-
 The idea and much of the implementation comes from Laszlo Szekeres.
 
 ## 2) How to use
@@ -51,7 +47,10 @@ The idea and much of the implementation comes from Laszlo Szekeres.
 In order to leverage this mechanism, you need to have modern enough GCC (>=
 version 4.5.0) and the plugin development headers installed on your system. That
 should be all you need. On Debian machines, these headers can be acquired by
-installing the `gcc-VERSION-plugin-dev` packages.
+installing the `gcc-VERSION-plugin-dev` packages. If you're compiling a GCC 
+plugin that differs from the system-installed version and encounter issues 
+with version checks, you can use the `AFL_GCC_DISABLE_VERSION_CHECK` environment 
+variable.
 
 To build the instrumentation itself, type `make`. This will generate binaries
 called `afl-gcc-fast` and `afl-g++-fast` in the parent directory.
@@ -74,7 +73,7 @@ standard operating mode of AFL++, e.g.:
 
 Note: We also used `CXX` to set the C++ compiler to `afl-g++-fast` for C++ code.
 
-The tool honors roughly the same environmental variables as `afl-gcc` (see
+The tool honors some environmental variables of `afl-clang-fast` (see
 [docs/env_variables.md](../docs/env_variables.md). This includes
 `AFL_INST_RATIO`, `AFL_USE_ASAN`, `AFL_HARDEN`, and `AFL_DONT_OPTIMIZE`.
 

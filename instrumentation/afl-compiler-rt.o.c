@@ -11,7 +11,6 @@
 
      https://www.apache.org/licenses/LICENSE-2.0
 
-
 */
 
 #ifdef __AFL_CODE_COVERAGE
@@ -358,12 +357,18 @@ static void __afl_map_shm(void) {
 
   if (__afl_final_loc) {
 
-    __afl_map_size = ++__afl_final_loc;  // as we count starting 0
+    __afl_map_size = __afl_final_loc + 1;  // as we count starting 0
 
     if (getenv("AFL_DUMP_MAP_SIZE")) {
 
       printf("%u\n", __afl_map_size);
       exit(-1);
+
+    }
+
+    if (__afl_debug) {
+
+      fprintf(stderr, "DEBUG: AFL_MAP_SIZE=%u\n", __afl_map_size);
 
     }
 
@@ -413,7 +418,7 @@ static void __afl_map_shm(void) {
 
     if ((ptr = getenv("AFL_MAP_SIZE")) != NULL) { val = atoi(ptr); }
 
-    if (val > MAP_INITIAL_SIZE) {
+    if (val > MAP_INITIAL_SIZE && val > __afl_final_loc) {
 
       __afl_map_size = val;
 
@@ -595,9 +600,9 @@ static void __afl_map_shm(void) {
 
     }
 
-    __afl_area_ptr_dummy = (u8 *)malloc(__afl_final_loc);
+    __afl_map_size = __afl_final_loc + 1;
+    __afl_area_ptr_dummy = (u8 *)malloc(__afl_map_size);
     __afl_area_ptr = __afl_area_ptr_dummy;
-    __afl_map_size = __afl_final_loc;
 
     if (!__afl_area_ptr_dummy) {
 
@@ -630,21 +635,21 @@ static void __afl_map_shm(void) {
 
       __afl_area_ptr_dummy = (u8 *)malloc(__afl_map_size);
 
-      if (__afl_area_ptr_dummy) {
+    }
 
-        if (__afl_selective_coverage_start_off) {
+    if (__afl_area_ptr_dummy) {
 
-          __afl_area_ptr = __afl_area_ptr_dummy;
+      if (__afl_selective_coverage_start_off) {
 
-        }
-
-      } else {
-
-        fprintf(stderr, "Error: __afl_selective_coverage failed!\n");
-        __afl_selective_coverage = 0;
-        // continue;
+        __afl_area_ptr = __afl_area_ptr_dummy;
 
       }
+
+    } else {
+
+      fprintf(stderr, "Error: __afl_selective_coverage failed!\n");
+      __afl_selective_coverage = 0;
+      // continue;
 
     }
 
@@ -2661,6 +2666,89 @@ void __cmplog_rtn_llvm_stdstring_stdstring(u8 *stdstring1, u8 *stdstring2) {
 
   __cmplog_rtn_hook(get_llvm_stdstring(stdstring1),
                     get_llvm_stdstring(stdstring2));
+
+}
+
+/* llvm weak hooks */
+
+void __sanitizer_weak_hook_memcmp(void *pc, const void *s1, const void *s2,
+                                  size_t n, int result) {
+
+  __cmplog_rtn_hook_n((u8 *)s1, (u8 *)s2, (u64)n);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_memmem(void *pc, const void *s1, size_t len1,
+                                  const void *s2, size_t len2, void *result) {
+
+  __cmplog_rtn_hook_n((u8 *)s1, (u8 *)s2, len1 < len2 ? (u64)len1 : (u64)len2);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strncasecmp(void *pc, const void *s1, const void *s2,
+                                       size_t n, int result) {
+
+  __cmplog_rtn_hook_strn((u8 *)s1, (u8 *)s2, (u64)n);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strncasestr(void *pc, const void *s1, const void *s2,
+                                       size_t n, char *result) {
+
+  __cmplog_rtn_hook_strn((u8 *)s1, (u8 *)s2, (u64)n);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strncmp(void *pc, const void *s1, const void *s2,
+                                   size_t n, int result) {
+
+  __cmplog_rtn_hook_strn((u8 *)s1, (u8 *)s2, (u64)n);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strcasecmp(void *pc, const void *s1, const void *s2,
+                                      int result) {
+
+  __cmplog_rtn_hook_str((u8 *)s1, (u8 *)s2);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strcasestr(void *pc, const void *s1, const void *s2,
+                                      size_t n, char *result) {
+
+  __cmplog_rtn_hook_str((u8 *)s1, (u8 *)s2);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strcmp(void *pc, const void *s1, const void *s2,
+                                  int result) {
+
+  __cmplog_rtn_hook_str((u8 *)s1, (u8 *)s2);
+  (void)pc;
+  (void)result;
+
+}
+
+void __sanitizer_weak_hook_strstr(void *pc, const void *s1, const void *s2,
+                                  char *result) {
+
+  __cmplog_rtn_hook_str((u8 *)s1, (u8 *)s2);
+  (void)pc;
+  (void)result;
 
 }
 

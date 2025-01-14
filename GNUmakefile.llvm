@@ -28,11 +28,11 @@ MAN_PATH    ?= $(PREFIX)/share/man/man8
 
 BUILD_DATE  ?= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" "+%Y-%m-%d" 2>/dev/null || date -u -r "$(SOURCE_DATE_EPOCH)" "+%Y-%m-%d" 2>/dev/null || date -u "+%Y-%m-%d")
 
-VERSION     = $(shell grep '^$(HASH)define VERSION ' ./config.h | cut -d '"' -f2)
+VERSION     = $(shell grep '^ *$(HASH)define VERSION ' ./config.h | cut -d '"' -f2)
 
 SYS = $(shell uname -s)
 
-override LLVM_TOO_NEW_DEFAULT := 18
+override LLVM_TOO_NEW_DEFAULT := 19
 override LLVM_TOO_OLD_DEFAULT := 13
 
 ifeq "$(SYS)" "OpenBSD"
@@ -69,9 +69,9 @@ endif
 
 LLVM_STDCXX                  := gnu++11
 LLVM_LTO                     := 0
-LLVM_UNSUPPORTED             := $(shell echo "$(LLVMVER)" | grep -E -q '^[0-2]\.|^3\.[0-8]\.' && echo 1 || echo 0)
+LLVM_UNSUPPORTED             := $(shell echo "$(LLVMVER)" | grep -E -q '^[0-2]\.|^3\.[0-7]\.|^2[0-9]\.' && echo 1 || echo 0)
 # Uncomment to see the values assigned above
-# $(foreach var,LLVM_CONFIG LLVMVER LLVM_MAJOR LLVM_MINOR LLVM_TOO_NEW LLVM_TOO_OLD LLVM_TOO_NEW_DEFAULT LLVM_TOO_OLD_DEFAULT LLVM_NEW_API LLVM_NEWER_API LLVM_13_OK LLVM_HAVE_LTO LLVM_BINDIR LLVM_LIBDIR LLVM_STDCXX LLVM_APPLE_XCODE LLVM_LTO LLVM_UNSUPPORTED,$(warning $(var) = $($(var))))
+# $(foreach var,_CLANG_VERSIONS_TO_TEST LLVM_CONFIG LLVMVER LLVM_MAJOR LLVM_MINOR LLVM_TOO_NEW LLVM_TOO_OLD LLVM_TOO_NEW_DEFAULT LLVM_TOO_OLD_DEFAULT LLVM_NEW_API LLVM_NEWER_API LLVM_13_OK LLVM_HAVE_LTO LLVM_BINDIR LLVM_LIBDIR LLVM_STDCXX LLVM_APPLE_XCODE LLVM_LTO LLVM_UNSUPPORTED,$(warning $(var) = $($(var))))
 
 ifeq "$(LLVMVER)" ""
   $(warning [!] llvm_mode needs llvm-config, which was not found. Set LLVM_CONFIG to its path and retry.)
@@ -163,7 +163,7 @@ endif
 
 # sanity check.
 # Are versions of clang --version and llvm-config --version equal?
-CLANGVER = $(shell $(CC) --version | sed -E -ne '/^.*version\ (1?[0-9]\.[0-9]\.[0-9]).*/s//\1/p')
+CLANGVER = $(shell $(CC) --version | sed -E -ne '/^.*version\ ([12]?[0-9]\.[0-9]\.[0-9]).*/s//\1/p')
 
 # I disable this because it does not make sense with what we did before (marc)
 # We did exactly set these 26 lines above with these values, and it would break
@@ -335,7 +335,7 @@ else
 endif
 
 ifeq "$(SYS)" "OpenBSD"
-  CLANG_LFL += $$($(LLVM_CONFIG) --libdir)/libLLVM.so
+  CLANG_LFL += $(LLVM_LIBDIR)/libLLVM.so
   CLANG_CPPFL += -mno-retpoline
   CFLAGS += -mno-retpoline
   # Needed for unwind symbols
@@ -508,7 +508,7 @@ document:
 .PHONY: test_build
 test_build: $(PROGS)
 	@echo "[*] Testing the CC wrapper and instrumentation output..."
-	unset AFL_USE_ASAN AFL_USE_MSAN AFL_INST_RATIO; ASAN_OPTIONS=detect_leaks=0 AFL_QUIET=1 AFL_PATH=. AFL_LLVM_LAF_ALL=1 ./afl-cc $(CFLAGS) $(CPPFLAGS) ./test-instr.c -o test-instr $(LDFLAGS)
+	unset AFL_USE_ASAN AFL_USE_MSAN AFL_INST_RATIO AFL_LLVM_ALLOWLIST AFL_LLVM_DENYLIST; ASAN_OPTIONS=detect_leaks=0 AFL_QUIET=1 AFL_PATH=. AFL_LLVM_LAF_ALL=1 ./afl-cc $(CFLAGS) $(CPPFLAGS) ./test-instr.c -o test-instr $(LDFLAGS)
 	ASAN_OPTIONS=detect_leaks=0 ./afl-showmap -m none -q -o .test-instr0 ./test-instr < /dev/null
 	echo 1 | ASAN_OPTIONS=detect_leaks=0 ./afl-showmap -m none -q -o .test-instr1 ./test-instr
 	@rm -f test-instr

@@ -98,7 +98,8 @@ typedef enum {
 
 } compiler_mode_id;
 
-static u8 cwd[4096];
+static u8   cwd[4096];
+static char opt_level = '3';
 
 char instrument_mode_string[18][18] = {
 
@@ -601,7 +602,6 @@ void compiler_mode_by_callname(aflcc_state_t *aflcc) {
   if (strncmp(aflcc->callname, "afl-clang-fast", 14) == 0) {
 
     /* afl-clang-fast is always created there by makefile
-      just like afl-clang, burdened with special purposes:
       - If llvm-config is not available (i.e. LLVM_MAJOR is 0),
         or too old, it falls back to LLVM-NATIVE mode and let
         the actual compiler complain if doesn't work.
@@ -881,9 +881,17 @@ static void instrument_mode_old_environ(aflcc_state_t *aflcc) {
 */
 static void instrument_mode_new_environ(aflcc_state_t *aflcc) {
 
+  u8 *ptr2;
+
+  if ((ptr2 = getenv("AFL_OPT_LEVEL"))) {
+
+    opt_level = ptr2[0];  // ignore invalid data
+
+  }
+
   if (!getenv("AFL_LLVM_INSTRUMENT")) { return; }
 
-  u8 *ptr2 = strtok(getenv("AFL_LLVM_INSTRUMENT"), ":,;");
+  ptr2 = strtok(getenv("AFL_LLVM_INSTRUMENT"), ":,;");
 
   while (ptr2) {
 
@@ -1211,11 +1219,8 @@ void mode_final_checkout(aflcc_state_t *aflcc, int argc, char **argv) {
   switch (aflcc->compiler_mode) {
 
     case GCC:
-      if (!aflcc->have_gcc) FATAL("afl-gcc is not available on your platform!");
       break;
     case CLANG:
-      if (!aflcc->have_clang)
-        FATAL("afl-clang is not available on your platform!");
       break;
     case LLVM:
       if (!aflcc->have_llvm)
@@ -1555,7 +1560,6 @@ void add_defs_selective_instr(aflcc_state_t *aflcc) {
 /*
   Macro defs for persistent mode. As documented in
   instrumentation/README.persistent_mode.md, deferred forkserver initialization
-  and persistent mode are not available in afl-gcc and afl-clang.
 */
 void add_defs_persistent_mode(aflcc_state_t *aflcc) {
 
@@ -1760,6 +1764,41 @@ static u8 fsanitize_fuzzer_comma(char *string) {
 
 }
 
+/* Add params to link with libAFLDriver.a on request */
+static void add_aflpplib(aflcc_state_t *aflcc) {
+
+  if (!aflcc->need_aflpplib) return;
+
+  u8 *afllib = find_object(aflcc, "libAFLDriver.a");
+
+  if (!be_quiet) {
+
+    OKF("Found '-fsanitize=fuzzer', replacing with libAFLDriver.a");
+
+  }
+
+  if (!afllib) {
+
+    if (!be_quiet) {
+
+      WARNF(
+          "Cannot find 'libAFLDriver.a' to replace '-fsanitize=fuzzer' in "
+          "the flags - this will fail!");
+
+    }
+
+  } else {
+
+    insert_param(aflcc, afllib);
+
+#ifdef __APPLE__
+    insert_param(aflcc, "-Wl,-undefined,dynamic_lookup");
+#endif
+
+  }
+
+}
+
 /*
   Parse and process possible -fsanitize related args, return PARAM_MISS
   if nothing matched. We have 3 main tasks here for these args:
@@ -1773,6 +1812,7 @@ static u8 fsanitize_fuzzer_comma(char *string) {
 param_st parse_fsanitize(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
 
   param_st final_ = PARAM_MISS;
+  u8       insert = 0;
 
 // MACRO START
 #define HAVE_SANITIZER_SCAN_KEEP(v, k)        \
@@ -1818,6 +1858,7 @@ param_st parse_fsanitize(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
     if (scan) {
 
       aflcc->need_aflpplib = 1;
+      insert = 1;
       final_ = PARAM_SCAN;
 
     } else {
@@ -1838,6 +1879,7 @@ param_st parse_fsanitize(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
       if (fsanitize_fuzzer_comma(cur_argv_)) {
 
         aflcc->need_aflpplib = 1;
+        insert = 1;
         final_ = PARAM_SCAN;
 
       }
@@ -1878,7 +1920,8 @@ param_st parse_fsanitize(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
 
   }
 
-  if (final_ == PARAM_KEEP) insert_param(aflcc, cur_argv);
+  if (final_ == PARAM_KEEP) { insert_param(aflcc, cur_argv); }
+  if (insert) { add_aflpplib(aflcc); }
 
   return final_;
 
@@ -1936,11 +1979,15 @@ void add_sanitizers(aflcc_state_t *aflcc, char **envp) {
 
   if (getenv("AFL_USE_UBSAN") || aflcc->have_ubsan) {
 
-    if (!aflcc->have_ubsan) {
+    if (!aflcc->have_ubsan) { insert_param(aflcc, "-fsanitize=undefined"); }
 
-      insert_param(aflcc, "-fsanitize=undefined");
-      insert_param(aflcc, "-fsanitize-undefined-trap-on-error");
-      insert_param(aflcc, "-fno-sanitize-recover=all");
+    if (getenv("AFL_UBSAN_VERBOSE")) {
+
+      insert_param(aflcc, "-fno-sanitize-recover=undefined");
+
+    } else {
+
+      insert_param(aflcc, "-fsanitize-trap=undefined");
 
     }
 
@@ -2000,6 +2047,12 @@ void add_sanitizers(aflcc_state_t *aflcc, char **envp) {
       }
 
       if (!aflcc->have_cfisan) { insert_param(aflcc, "-fsanitize=cfi"); }
+
+      if (getenv("AFL_CFISAN_VERBOSE")) {
+
+        insert_param(aflcc, "-fno-sanitize-trap=cfi");
+
+      }
 
       if (!aflcc->have_hidden) {
 
@@ -2338,41 +2391,6 @@ void add_lto_passes(aflcc_state_t *aflcc) {
 
 }
 
-/* Add params to link with libAFLDriver.a on request */
-static void add_aflpplib(aflcc_state_t *aflcc) {
-
-  if (!aflcc->need_aflpplib) return;
-
-  u8 *afllib = find_object(aflcc, "libAFLDriver.a");
-
-  if (!be_quiet) {
-
-    OKF("Found '-fsanitize=fuzzer', replacing with libAFLDriver.a");
-
-  }
-
-  if (!afllib) {
-
-    if (!be_quiet) {
-
-      WARNF(
-          "Cannot find 'libAFLDriver.a' to replace '-fsanitize=fuzzer' in "
-          "the flags - this will fail!");
-
-    }
-
-  } else {
-
-    insert_param(aflcc, afllib);
-
-#ifdef __APPLE__
-    insert_param(aflcc, "-Wl,-undefined,dynamic_lookup");
-#endif
-
-  }
-
-}
-
 /* Add params to link with runtimes depended by our instrumentation */
 void add_runtime(aflcc_state_t *aflcc) {
 
@@ -2465,7 +2483,7 @@ void add_runtime(aflcc_state_t *aflcc) {
 
 #endif
 
-  add_aflpplib(aflcc);
+  add_aflpplib(aflcc);  // double insertion helps compiling
 
 #if defined(USEMMAP) && !defined(__HAIKU__) && !__APPLE__
   insert_param(aflcc, "-Wl,-lrt");
@@ -2561,6 +2579,33 @@ void add_gcc_plugin(aflcc_state_t *aflcc) {
 
 }
 
+char *get_opt_level() {
+
+  static char levels[8][8] = {"-O0", "-O1", "-O2",    "-O3",
+                              "-Oz", "-Os", "-Ofast", "-Og"};
+  switch (opt_level) {
+
+    case '0':
+      return levels[0];
+    case '1':
+      return levels[1];
+    case '2':
+      return levels[2];
+    case 'z':
+      return levels[4];
+    case 's':
+      return levels[5];
+    case 'f':
+      return levels[6];
+    case 'g':
+      return levels[7];
+    default:
+      return levels[3];
+
+  }
+
+}
+
 /* Add some miscellaneous params required by our instrumentation. */
 void add_misc_params(aflcc_state_t *aflcc) {
 
@@ -2573,6 +2618,7 @@ void add_misc_params(aflcc_state_t *aflcc) {
     insert_param(aflcc, "-fno-builtin-strcasecmp");
     insert_param(aflcc, "-fno-builtin-strncasecmp");
     insert_param(aflcc, "-fno-builtin-memcmp");
+    insert_param(aflcc, "-fno-builtin-memmem");
     insert_param(aflcc, "-fno-builtin-bcmp");
     insert_param(aflcc, "-fno-builtin-strstr");
     insert_param(aflcc, "-fno-builtin-strcasestr");
@@ -2592,7 +2638,7 @@ void add_misc_params(aflcc_state_t *aflcc) {
   if (!getenv("AFL_DONT_OPTIMIZE")) {
 
     insert_param(aflcc, "-g");
-    if (!aflcc->have_o) insert_param(aflcc, "-O3");
+    if (!aflcc->have_o) insert_param(aflcc, get_opt_level());
     if (!aflcc->have_unroll) insert_param(aflcc, "-funroll-loops");
     // if (strlen(aflcc->march_opt) > 1 && aflcc->march_opt[0] == '-')
     //     insert_param(aflcc, aflcc->march_opt);
@@ -2810,10 +2856,7 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
         "   yes\n"
         "  [GCC_PLUGIN] gcc plugin: %s%s\n"
         "      CLASSIC              DEFAULT      no  yes     no     no  no     "
-        "yes\n"
-        "  [GCC/CLANG] simple gcc/clang: %s%s\n"
-        "      CLASSIC              DEFAULT      no  no      no     no  no     "
-        "no\n\n",
+        "yes\n\n",
         aflcc->have_llvm ? "AVAILABLE   " : "unavailable!",
         aflcc->compiler_mode == LLVM ? " [SELECTED]" : "",
         aflcc->have_llvm ? "AVAILABLE   " : "unavailable!",
@@ -2821,15 +2864,7 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
         aflcc->have_lto ? "AVAILABLE" : "unavailable!",
         aflcc->compiler_mode == LTO ? " [SELECTED]" : "",
         aflcc->have_gcc_plugin ? "AVAILABLE" : "unavailable!",
-        aflcc->compiler_mode == GCC_PLUGIN ? " [SELECTED]" : "",
-        aflcc->have_gcc && aflcc->have_clang
-            ? "AVAILABLE"
-            : (aflcc->have_gcc
-                   ? "GCC ONLY "
-                   : (aflcc->have_clang ? "CLANG ONLY" : "unavailable!")),
-        (aflcc->compiler_mode == GCC || aflcc->compiler_mode == CLANG)
-            ? " [SELECTED]"
-            : "");
+        aflcc->compiler_mode == GCC_PLUGIN ? " [SELECTED]" : "");
 
     SAYF(
         "Modes:\n"
@@ -2922,6 +2957,8 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
         SAYF(
             "\nGCC Plugin-specific environment variables:\n"
             "  AFL_GCC_CMPLOG: log operands of comparisons (RedQueen mutator)\n"
+            "  AFL_GCC_DISABLE_VERSION_CHECK: disable GCC plugin version "
+            "control\n"
             "  AFL_GCC_OUT_OF_LINE: disable inlined instrumentation\n"
             "  AFL_GCC_SKIP_NEVERZERO: do not skip zero on trace counters\n"
             "  AFL_GCC_INSTRUMENT_FILE: enable selective instrumentation by "
@@ -3517,14 +3554,26 @@ int main(int argc, char **argv, char **envp) {
 
   maybe_usage(aflcc, argc, argv);
 
+  if (aflcc->instrument_mode == INSTRUMENT_GCC ||
+      aflcc->instrument_mode == INSTRUMENT_CLANG) {
+
+    FATAL(
+        "afl-gcc/afl-clang are obsolete and has been removed. Use "
+        "afl-clang-fast/afl-gcc-fast for instrumentation instead.");
+
+  }
+
   mode_notification(aflcc);
 
   if (aflcc->debug) debugf_args(argc, argv);
 
   edit_params(aflcc, argc, argv, envp);
 
-  if (aflcc->debug)
+  if (aflcc->debug) {
+
     debugf_args((s32)aflcc->cc_par_cnt, (char **)aflcc->cc_params);
+
+  }
 
   if (aflcc->passthrough) {
 
