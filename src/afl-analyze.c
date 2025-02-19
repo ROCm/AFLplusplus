@@ -110,8 +110,9 @@ static u8 count_class_lookup[256] = {
 
 };
 
-static void kill_child() {
+static void kill_child(int signal) {
 
+  (void)signal;
   if (fsrv.child_pid > 0) {
 
     kill(fsrv.child_pid, fsrv.child_kill_signal);
@@ -974,7 +975,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
         break;
 
-      case 'Y':  // fallthough
+      case 'Y':  // fallthrough
 #ifdef __linux__
       case 'X':                                                 /* NYX mode */
 
@@ -987,7 +988,7 @@ int main(int argc, char **argv_orig, char **envp) {
         break;
 #else
       case 'X':
-        FATAL("Nyx mode is only availabe on linux...");
+        FATAL("Nyx mode is only available on linux...");
         break;
 #endif
 

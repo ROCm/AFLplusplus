@@ -1,12 +1,19 @@
+#ifndef _COVERAGE_H
+
+#define _COVERAGE_H
+
 #include "config.h"
 #include "types.h"
+
+#define _AFL_INTSIZEVAR u64
 
 #if (defined(__AVX512F__) && defined(__AVX512DQ__)) || defined(__AVX2__)
   #include <immintrin.h>
 #endif
 
-u32 skim(const u64 *virgin, const u64 *current, const u64 *current_end);
-u64 classify_word(u64 word);
+u32  skim(const u64 *virgin, const u64 *current, const u64 *current_end);
+u64  classify_word(u64 word);
+void classify_counts_mem(u64 *mem, u32 size);
 
 inline u64 classify_word(u64 word) {
 
@@ -72,6 +79,22 @@ inline void classify_counts(afl_forkserver_t *fsrv) {
 
 }
 
+inline void classify_counts_mem(u64 *mem, u32 size) {
+
+  u32 i = (size >> 3);
+
+  while (i--) {
+
+    /* Optimize for sparse bitmaps. */
+
+    if (unlikely(*mem)) { *mem = classify_word(*mem); }
+
+    mem++;
+
+  }
+
+}
+
 /* Updates the virgin bits, then reflects whether a new count or a new tuple is
  * seen in ret. */
 inline void discover_word(u8 *ret, u64 *current, u64 *virgin) {
@@ -118,7 +141,7 @@ inline u32 skim(const u64 *virgin, const u64 *current, const u64 *current_end) {
     /* All bytes are zero. */
     if (likely(mask == 0xff)) continue;
 
-      /* Look for nonzero bytes and check for new bits. */
+        /* Look for nonzero bytes and check for new bits. */
   #define UNROLL(x)                                                            \
     if (unlikely(!(mask & (1 << x)) && classify_word(current[x]) & virgin[x])) \
     return 1
@@ -189,6 +212,8 @@ inline u32 skim(const u64 *virgin, const u64 *current, const u64 *current_end) {
   return 0;
 
 }
+
+#endif
 
 #endif
 

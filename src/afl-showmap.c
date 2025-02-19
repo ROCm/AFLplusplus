@@ -131,8 +131,9 @@ static const u8 count_class_binary[256] = {
 
 };
 
-static void kill_child() {
+static void kill_child(int signal) {
 
+  (void)signal;
   timed_out = 1;
   if (fsrv->child_pid > 0) {
 
@@ -1259,7 +1260,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
         break;
 
-      /* FIXME: We want to use -P for consistency, but it is already unsed for
+      /* FIXME: We want to use -P for consistency, but it is already unused for
        * undocumenetd feature "Another afl-cmin specific feature." */
       case 'A':                                           /* CoreSight mode */
 
@@ -1307,7 +1308,7 @@ int main(int argc, char **argv_orig, char **envp) {
         break;
 #else
       case 'X':
-        FATAL("Nyx mode is only availabe on linux...");
+        FATAL("Nyx mode is only available on linux...");
         break;
 #endif
 
@@ -1684,7 +1685,7 @@ int main(int argc, char **argv_orig, char **envp) {
     } else {
 
       if ((coverage_map = (u8 *)malloc(map_size + 64)) == NULL)
-        FATAL("coult not grab memory");
+        FATAL("could not grab memory");
       edges_only = false;
 
     }
