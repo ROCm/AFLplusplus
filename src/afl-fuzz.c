@@ -757,10 +757,11 @@ int main(int argc, char **argv_orig, char **envp) {
 
   afl->shmem_testcase_mode = 1;  // we always try to perform shmem fuzzing
 
-  // still available: HjJkqrv
+  // still available: HJkqrv
+  // (`j` enables match-table coverage; `K` and `w` are used upstream.)
   while ((opt = getopt(
               argc, argv,
-              "+a:Ab:B:c:CdDe:E:f:F:g:G:hi:I:K:l:L:m:M:nNo:Op:P:QRs:S:t:T:"
+              "+a:Ab:B:c:CdDe:E:f:F:g:G:hi:jI:K:l:L:m:M:nNo:Op:P:QRs:S:t:T:"
               "uUV:w:WXx:YzZ")) > 0) {
 
     switch (opt) {
