@@ -56,17 +56,17 @@
 /* Default file permission umode when creating files (default: 0600) */
 #define DEFAULT_PERMISSION 0600
 
-  #ifdef __APPLE__
-    #include <TargetConditionals.h>
-    #if TARGET_OS_IOS
-      #undef DEFAULT_PERMISSION
-      #define DEFAULT_PERMISSION 0666
-    #endif
-  #endif
-  #ifdef __ANDROID__
+#ifdef __APPLE__
+  #include <TargetConditionals.h>
+  #if TARGET_OS_IOS
     #undef DEFAULT_PERMISSION
     #define DEFAULT_PERMISSION 0666
   #endif
+#endif
+#ifdef __ANDROID__
+  #undef DEFAULT_PERMISSION
+  #define DEFAULT_PERMISSION 0666
+#endif
 
 /* SkipDet's global configuration */
 

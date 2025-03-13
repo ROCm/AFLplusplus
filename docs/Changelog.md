@@ -185,9 +185,6 @@
       it.
     - Python 3.13+ support
     - loose file and shared memory permissions on Android and iPhone
-    - splicing is now DISABLED by default because research showed
-      it is counterproductive. New command line parameter `-u` to enable
-      it. Splicing is auto-enabled if two cycles without finds happen.
   - afl-cc:
     - LLVM 20 support (again - please don't change the API all the time ...)
     - -fsanitize=fuzzer now inserts libAFLDriver.a addtionally early to help
