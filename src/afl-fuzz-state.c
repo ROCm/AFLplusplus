@@ -81,6 +81,14 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
 
   afl->shm.map_size = map_size ? map_size : MAP_SIZE;
 
+  afl->shadow_shm.map_size = SHADOW_TABLE_ALLIGNED_SIZE;
+  if (afl->shadow_shm.map_size < SHADOW_TABLE_ALLIGNED_MIN_SIZE) {
+    BADF("Shadow table size: %u too small. Did you set it properly?\n",
+         SHADOW_TABLE_ALLIGNED_SIZE);
+  }
+
+  afl->shadow_shm.shadow_mode = 1;
+
   afl->w_init = 0.9;
   afl->w_end = 0.3;
   afl->g_max = 5000;

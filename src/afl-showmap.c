@@ -103,6 +103,7 @@ static volatile u8 stop_soon,          /* Ctrl-C pressed?                   */
     child_crashed;                     /* Child crashed?                    */
 
 static sharedmem_t       shm;
+static sharedmem_t       shadow_shm;
 static afl_forkserver_t *fsrv;
 static sharedmem_t      *shm_fuzz;
 
@@ -228,6 +229,7 @@ static void at_exit_handler(void) {
 
     remove_shm = false;
     if (shm.map) afl_shm_deinit(&shm);
+    if (shadow_shm.map) afl_shm_deinit(&shadow_shm);
     if ((shm_fuzz && shm_fuzz->shmemfuzz_mode) || fsrv->use_shmem_fuzz) {
 
       shm_fuzz = deinit_shmem(fsrv, shm_fuzz);
@@ -1387,6 +1389,8 @@ int main(int argc, char **argv_orig, char **envp) {
 
   set_up_environment(fsrv, argv);
 
+  shadow_shm.shadow_mode = 1;
+
 #ifdef __linux__
   if (!fsrv->nyx_mode) {
 
@@ -1797,6 +1801,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
   remove_shm = false;
   afl_shm_deinit(&shm);
+  // afl_shm_deinit(&shadow_shm);
   if (fsrv->use_shmem_fuzz) { shm_fuzz = deinit_shmem(fsrv, shm_fuzz); }
 
   u32 ret;

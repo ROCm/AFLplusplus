@@ -72,6 +72,10 @@ void afl_shm_deinit(sharedmem_t *shm) {
 
     unsetenv(SHM_FUZZ_ENV_VAR);
 
+  } else if (shm->shadow_mode) {
+
+    unsetenv(SHADOW_SHM_ENV_VAR);
+  
   } else {
 
     unsetenv(SHM_ENV_VAR);
@@ -308,7 +312,12 @@ u8 *afl_shm_init(sharedmem_t *shm, size_t map_size,
        since we won't be sending fork server commands. This should be replaced
        with better auto-detection later on, perhaps? */
 
-    setenv(SHM_ENV_VAR, shm_str, 1);
+    if (shm->shadow_mode) {
+      setenv(SHADOW_SHM_ENV_VAR, shm_str, 1);
+
+    } else {
+      setenv(SHM_ENV_VAR, shm_str, 1);
+    }
 
     ck_free(shm_str);
 
