@@ -2529,6 +2529,10 @@ int main(int argc, char **argv_orig, char **envp) {
   afl->fsrv.trace_bits =
       afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode);
 
+  assert(afl->fsrv.shadow_size > 0);
+  printf("Shadow_size: %u\n", afl->fsrv.shadow_size);
+  // afl->fsrv.shadow_bits = afl_shm_init(&afl->shadow_shm, afl->fsrv.shadow_size, afl->non_instrumented_mode);
+  printf("After afl_shm_init\n");
   if (!afl->non_instrumented_mode && !afl->fsrv.qemu_mode &&
       !afl->unicorn_mode && !afl->fsrv.frida_mode && !afl->fsrv.cs_mode &&
       !afl->afl_env.afl_skip_bin_check) {
@@ -2906,10 +2910,12 @@ int main(int argc, char **argv_orig, char **envp) {
     if (afl->in_bitmap) {
 
       read_bitmap(afl->in_bitmap, afl->virgin_bits, afl->fsrv.map_size);
+      FATAL("Should've provided shadow_bits for initialization");
 
     } else {
 
       memset(afl->virgin_bits, 255, map_size);
+      memset(afl->shadow_bits, 255, afl->shadow_shm.map_size);
 
     }
 

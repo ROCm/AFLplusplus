@@ -254,6 +254,11 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->child_pid = -1;
   fsrv->map_size = get_map_size();
   fsrv->real_map_size = fsrv->map_size;
+  fsrv->shadow_size = SHADOW_TABLE_ALLIGNED_SIZE;
+  if (fsrv->shadow_size < SHADOW_TABLE_ALLIGNED_MIN_SIZE) {
+    BADF("Shadow table size: %u too small. Did you set it properly?\n",
+         SHADOW_TABLE_ALLIGNED_SIZE);
+  }
   fsrv->use_fauxsrv = false;
   fsrv->last_run_timed_out = false;
   fsrv->debug = false;

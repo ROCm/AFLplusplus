@@ -1407,6 +1407,7 @@ int main(int argc, char **argv_orig, char **envp) {
 #endif
 
   fsrv->trace_bits = afl_shm_init(&shm, map_size, 0);
+  fsrv->shadow_bits = afl_shm_init(&shadow_shm, fsrv->shadow_size, 0);
 
   if (!quiet_mode) {
 
@@ -1801,7 +1802,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
   remove_shm = false;
   afl_shm_deinit(&shm);
-  // afl_shm_deinit(&shadow_shm);
+  afl_shm_deinit(&shadow_shm);
   if (fsrv->use_shmem_fuzz) { shm_fuzz = deinit_shmem(fsrv, shm_fuzz); }
 
   u32 ret;
