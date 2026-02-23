@@ -140,14 +140,17 @@ u8 *u_stringify_mem_size(u8 *buf, u64 val);
 
 u8 *u_stringify_time_diff(u8 *buf, u64 cur_ms, u64 event_ms);
 
+/* Validate map size, returns validated size or FATALs if invalid */
+u32 validate_map_size(u32 map_size);
+
 /* Reads the map size from ENV */
 u32 get_map_size(void);
 
 /* create a stream file */
-FILE *create_ffile(u8 *fn);
+FILE *create_ffile(u8 *fn, mode_t perm);
 
 /* create a file */
-s32 create_file(u8 *fn);
+s32 create_file(u8 *fn, mode_t perm);
 
 /* memmem implementation as not all platforms support this */
 void *afl_memmem(const void *haystack, size_t haystacklen, const void *needle,

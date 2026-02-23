@@ -14,7 +14,7 @@ Note that afl-gcc and afl-clang have been removed because their instrumentation 
 | NeverZero           [B]       |    x(1)   |      x     |        x       |         x        |         x        |              |                    |
 | Persistent Mode     [C]       |     x     |      x     | x86[_64]/arm64 | x86[_64]/arm[64] |         x        |              |                    |
 | LAF-Intel / CompCov [D]       |     x     |            |                | x86[_64]/arm[64] | x86[_64]/arm[64] |   x86[_64]   |                    |
-| CmpLog              [E]       |     x     |      x     | x86[_64]/arm64 | x86[_64]/arm[64] |                  |              |                    |
+| CmpLog              [E]       |     x     |      x     | x86[_64]/arm64 | x86[_64]/arm[64] | x86[_64]/arm[64] |              |                    |
 | Selective Instrumentation [F] |     x     |      x     |        x       |         x        |                  |              |                    |
 | Non-Colliding Coverage    [G] |    x(4)   |            |                |       (x)(5)     |                  |              |                    |
 | Ngram prev_loc Coverage   [H] |    x(6)   |            |                |                  |                  |              |                    |
@@ -45,7 +45,7 @@ E. CmpLog is our enhanced
    implementation, see
    [instrumentation/README.cmplog.md](../instrumentation/README.cmplog.md)
 
-F. Similar and compatible to clang 13+ sancov sanitize-coverage-allow/deny but
+F. Similar and compatible to clang 14+ sancov sanitize-coverage-allow/deny but
    for all llvm versions and all our compile modes, only instrument what should
    be instrumented, for more speed, directed fuzzing and less instability; see
    [instrumentation/README.instrument_list.md](../instrumentation/README.instrument_list.md)

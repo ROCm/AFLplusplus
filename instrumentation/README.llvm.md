@@ -7,7 +7,7 @@ For the GCC-based instrumentation, see
 
 ## 1) Introduction
 
-! llvm_mode works with llvm versions 3.8 up to 17 - but 13+ is recommended !
+! llvm_mode works with llvm versions 14 up to 21 - but 18+ is recommended !
 
 The code in this directory allows you to instrument programs for AFL++ using
 true compiler-level instrumentation, instead of the more crude assembly-level
@@ -32,14 +32,18 @@ properties:
   will *not* work with GCC (see ../gcc_plugin/ for an alternative once it is
   available).
 
+For clarity, note that this approach _replaces_ using the variable
+[`AFL_INST_RATIO`](https://aflplus.plus/docs/env_variables/).
+
 The idea and much of the initial implementation came from Laszlo Szekeres.
 
 ## 2a) How to use this - short
 
-Set the `LLVM_CONFIG` variable to the clang version you want to use, e.g.:
+Rebuild afl++ with the `LLVM_CONFIG` variable set to the clang version
+you want to use, e.g.:
 
 ```
-LLVM_CONFIG=llvm-config-9 make
+LLVM_CONFIG=llvm-config-21 make
 ```
 
 In case you have your own compiled llvm version specify the full path:
@@ -53,13 +57,14 @@ old c++ libraries. In this case usually switching to gcc/g++ to compile
 llvm_mode will work:
 
 ```
-LLVM_CONFIG=llvm-config-7 REAL_CC=gcc REAL_CXX=g++ make
+LLVM_CONFIG=llvm-config-21 REAL_CC=gcc REAL_CXX=g++ make
 ```
 
 It is highly recommended to use the newest clang version you can put your hands
 on :)
 
-Then look at [README.persistent_mode.md](README.persistent_mode.md).
+Then look at [README.persistent_mode.md](README.persistent_mode.md).  It's worth
+checking whether your current build has already been built appropriately.
 
 ## 2b) How to use this - long
 

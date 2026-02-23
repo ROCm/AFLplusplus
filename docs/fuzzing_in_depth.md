@@ -132,11 +132,15 @@ options are available:
   locations. This technique is very fast and good - if the target does not
   transform input data before comparison. Therefore, this technique is called
   `input to state` or `redqueen`. If you want to use this technique, then you
-  have to compile the target twice, once specifically with/for this mode by
-  setting `AFL_LLVM_CMPLOG=1`, and pass this binary to afl-fuzz via the `-c`
-  parameter. Note that you can compile also just a cmplog binary and use that
-  for both, however, there will be a performance penalty. You can read more
-  about this in
+  have to compile the target with `AFL_LLVM_CMPLOG=1`.
+  You could use the resulting binary for both normal fuzzing and `-c` CMPLOG
+  mode (with `-c 0`), however this will result in a performance loss of about
+  20%.
+  It is therefore better to compile a specific CMPLOG target with
+  `AFL_LLVM_CMPLOG=1` and pass this binary name via
+  `-c cmplog-fuzzing-target` and compile target again normally with `afl-cc`
+   and use this is the fuzzing target as usual.
+  You can read more about this in
   [instrumentation/README.cmplog.md](../instrumentation/README.cmplog.md).
 
 If you use LTO, LLVM, or GCC_PLUGIN mode
@@ -246,6 +250,12 @@ others often cannot work together because of target weirdness, e.g., ASAN and
 CFISAN. You might need to experiment which sanitizers you can combine in a
 target (which means more instances can be run without a sanitized target, which
 is more effective).
+
+Note that some sanitizers (MSAN and LSAN) exit with a particular exit code
+instead of aborting. afl-fuzz treats these exit codes as a crash when these
+sanitizers are enabled. If the target uses these exit codes there could be false
+positives among the saved crashes. LSAN uses exit code 23 and MSAN uses exit
+code 86.
 
 ### d) Modifying the target
 
@@ -496,6 +506,8 @@ Note:
   protection against attacks! So set strong firewall rules and only expose SSH
   as a network service if you use these (which is highly recommended).
 
+If you execute afl-fuzz in a Docker container, it is recommended to pass [`--cpuset-cpus`](https://docs.docker.com/engine/containers/resource_constraints/#configure-the-default-cfs-scheduler) option with free CPU cores to docker daemon when starting the container, or pass `AFL_NO_AFFINITY` to afl-fuzz. This is due to the fact that AFL++ will bind to a free CPU core by default, while Docker container will prevent AFL++ instance from seeing processes in other containers or host, which leads to all AFL++ instances trying to bind the same CPU core.
+
 If you have an input corpus from [step 2](#2-preparing-the-fuzzing-campaign),
 then specify this directory with the `-i` option. Otherwise, create a new
 directory and create a file with any content as test data in there.
@@ -627,8 +639,8 @@ The other secondaries should be run like this:
 * 40% should run with `-P explore` and 20% with `-P exploit`
 * If you use `-a` then set 30% of the instances to not use `-a`; if you did
   not set `-a` (why??), then set 30% to `-a ascii` and 30% to `-a binary`.
-* run each with a different power schedule, recommended are: `fast` (default),
-  `explore`, `coe`, `lin`, `quad`, `exploit`, and `rare` which you can set with
+* run each with a different power schedule, recommended are: `explore` (default),
+  `fast`, `coe`, `lin`, `quad`, `exploit`, and `rare` which you can set with
   the `-p` option, e.g., `-p explore`. See the
   [FAQ](FAQ.md#what-are-power-schedules) for details.
 
@@ -857,10 +869,13 @@ Here are some of the most important caveats for AFL++:
 
 - There is no direct support for fuzzing network services, background daemons,
   or interactive apps that require UI interaction to work. You may need to make
-  simple code changes to make them behave in a more traditional way. Preeny or
-  libdesock may offer a relatively simple option, too - see:
+  simple code changes to make them behave in a more traditional way. Preeny,
+  libdesock or desockmulti may offer a relatively simple option, too - see:
   [https://github.com/zardus/preeny](https://github.com/zardus/preeny) or
   [https://github.com/fkie-cad/libdesock](https://github.com/fkie-cad/libdesock)
+  [https://github.com/zyingp/desockmulti](https://github.com/zyingp/desockmulti)
+  If these fail then try our own which might be a bit slower but is more
+  reliable: [utils/libaflppdesock](../utils/libaflppdesock)
 
   Some useful tips for modifying network-based services can be also found at:
   [https://www.fastly.com/blog/how-to-fuzz-server-american-fuzzy-lop](https://www.fastly.com/blog/how-to-fuzz-server-american-fuzzy-lop)
@@ -922,6 +937,25 @@ contain severity and other information.
 ```shell
 casr-afl -i /path/to/afl/out/dir -o /path/to/casr/out/dir
 ```
+
+### If crashes do not reproduce
+
+Sometimes crashes AFL++ finds cannot be reproduced.
+
+This usually means that limits applied at the time of fuzzing that crashes the
+target process, e.g. running out of memory, or the limit of a set `-m` being
+reached.
+
+If you do persistent fuzzing, then it is also possible that the target keeps
+persistent state (this is mostly for AFL_LOOP/LLVMFuzzerTestOneInput type
+targets).
+In this case either fuzz with the env var `AFL_ALLOW_CORES` to create core
+files and analyze them where the cash occur (slows down fuzzing, so only use
+this for analysis), or you recompile AFL++ with a config.h setting that enables
+`AFL_PERSISTENT_RECORD` and `AFL_PERSISTENT_REPLAY_ARGPARSE`.
+[Read the documentation](../instrumentation/README.persistent_mode.md) on how
+to configure persistent record at runtime, and how to replay these.
+
 
 ## 5. CI fuzzing
 

@@ -44,6 +44,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -63,6 +64,53 @@ extern "C" {
 #ifdef _DEBUG
   #include "hash.h"
 #endif
+
+#if defined(__APPLE__) && defined(__MACH__)
+  #define SECTION_RODATA                          \
+    __attribute__((used, retain)) __attribute__(( \
+        section("__RODATA,__"                     \
+                "rodata")))
+#else
+  #define SECTION_RODATA \
+    __attribute__((used, retain)) __attribute__((section(".rodata")))
+#endif
+
+#if !defined(__has_attribute)
+  #define __has_attribute(x) 0
+#endif
+
+/* Portable "no ASan" attribute */
+#if defined(__clang__)
+  #if __has_attribute(no_sanitize)
+    #define NOASAN __attribute__((no_sanitize("address")))
+  #elif __has_attribute(no_sanitize_address)
+    #define NOASAN __attribute__((no_sanitize_address))
+  #else
+    #define NOASAN
+  #endif
+#elif defined(__GNUC__)
+  /* GCC: uses no_sanitize_address */
+  #if __has_attribute(no_sanitize_address) || (__GNUC__ >= 5)
+    #define NOASAN __attribute__((no_sanitize_address))
+  #else
+    #define NOASAN
+  #endif
+#else
+  #define NOASAN
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+  #define FORCEINLINE __attribute__((always_inline)) inline
+#else
+  #define FORCEINLINE inline
+#endif
+
+// lowers to inline memset, no libc call to interpose
+static FORCEINLINE NOASAN void *memset_noasan(void *dst, int c, size_t n) {
+
+  return __builtin_memset(dst, c, n);
+
+}
 
 // AFL++ shared memory fuzz cases
 int                   __afl_sharedmem_fuzzing = 1;
@@ -106,12 +154,13 @@ __attribute__((weak)) void __asan_unpoison_memory_region(
 __attribute__((weak)) void *__asan_region_is_poisoned(void *beg, size_t size);
 
 // Notify AFL about persistent mode.
-static volatile char AFL_PERSISTENT[] = "##SIG_AFL_PERSISTENT##";
-int                  __afl_persistent_loop(unsigned int);
+SECTION_RODATA static const char AFL_PERSISTENT[] = "##SIG_AFL_PERSISTENT##";
+int                              __afl_persistent_loop(unsigned int);
 
 // Notify AFL about deferred forkserver.
-static volatile char AFL_DEFER_FORKSVR[] = "##SIG_AFL_DEFER_FORKSRV##";
-void                 __afl_manual_init();
+SECTION_RODATA static const char AFL_DEFER_FORKSVR[] =
+    "##SIG_AFL_DEFER_FORKSRV##";
+void __afl_manual_init();
 
 // Use this optionally defined function to output sanitizer messages even if
 // user asks to close stderr.
@@ -350,11 +399,6 @@ __attribute__((weak)) int LLVMFuzzerRunDriver(
 
   // Do any other expensive one-time initialization here.
 
-  uint8_t dummy_input[64] = {0};
-  memcpy(dummy_input, (void *)AFL_PERSISTENT, sizeof(AFL_PERSISTENT));
-  memcpy(dummy_input + 32, (void *)AFL_DEFER_FORKSVR,
-         sizeof(AFL_DEFER_FORKSVR));
-
   int N = INT_MAX;
 
   if (!in_afl && argc == 2 && !strcmp(argv[1], "-")) {
@@ -420,7 +464,7 @@ __attribute__((weak)) int LLVMFuzzerRunDriver(
 
         if (unlikely(callback(__afl_fuzz_ptr, length) == -1)) {
 
-          memset(__afl_area_ptr, 0, __afl_map_size);
+          memset_noasan(__afl_area_ptr, 0, __afl_map_size);
           __afl_area_ptr[0] = 1;
 
         }
@@ -435,7 +479,7 @@ __attribute__((weak)) int LLVMFuzzerRunDriver(
 
       if (unlikely(callback(__afl_fuzz_ptr, *__afl_fuzz_len) == -1)) {
 
-        memset(__afl_area_ptr, 0, __afl_map_size);
+        memset_noasan(__afl_area_ptr, 0, __afl_map_size);
         __afl_area_ptr[0] = 1;
 
       }

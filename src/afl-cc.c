@@ -21,6 +21,10 @@
   #define _GNU_SOURCE 1
 #endif
 
+#ifndef AFL_INCLUDE_PATH
+  #define AFL_INCLUDE_PATH "/usr/local/include/afl"
+#endif
+
 #include "common.h"
 #include "config.h"
 #include "types.h"
@@ -175,20 +179,17 @@ typedef struct aflcc_state {
   u8 cmplog_mode;
 
   u8 have_instr_env, have_gcc, have_clang, have_llvm, have_gcc_plugin, have_lto,
-      have_optimized_pcguard, have_instr_list;
+      have_optimized_pcguard, have_instr_list, wnoerror;
 
   u8 fortify_set, x_set, bit_mode, preprocessor_only, have_unroll, have_o,
       have_pic, have_c, shared_linking, partial_linking, non_dash, have_fp,
       have_flto, have_hidden, have_fortify, have_fcf, have_staticasan,
       have_rust_asanrt, have_asan, have_msan, have_ubsan, have_lsan, have_tsan,
-      have_cfisan;
+      have_cfisan, have_rtsan;
 
   // u8 *march_opt;
   u8  need_aflpplib;
   int passthrough;
-
-  u8  use_stdin;                                                   /* dummy */
-  u8 *argvnull;                                                    /* dummy */
 
 } aflcc_state_t;
 
@@ -198,13 +199,22 @@ u8 *find_object(aflcc_state_t *, u8 *obj);
 
 void find_built_deps(aflcc_state_t *);
 
+static inline void increment_cc_parameter_cnt(aflcc_state_t *aflcc) {
+
+  aflcc->cc_par_cnt += 1;
+  if (unlikely(aflcc->cc_par_cnt >= MAX_PARAMS_NUM)) {
+
+    FATAL("Too many command line parameters. Please increase MAX_PARAMS_NUM.");
+
+  }
+
+}
+
 /* Insert param into the new argv, raise error if MAX_PARAMS_NUM exceeded. */
 static inline void insert_param(aflcc_state_t *aflcc, u8 *param) {
 
-  if (unlikely(aflcc->cc_par_cnt + 1 >= MAX_PARAMS_NUM))
-    FATAL("Too many command line parameters, please increase MAX_PARAMS_NUM.");
-
-  aflcc->cc_params[aflcc->cc_par_cnt++] = param;
+  aflcc->cc_params[aflcc->cc_par_cnt] = param;
+  increment_cc_parameter_cnt(aflcc);
 
 }
 
@@ -247,16 +257,20 @@ static inline void insert_object(aflcc_state_t *aflcc, u8 *obj, u8 *fmt,
 /* Insert params into the new argv, make clang load the pass. */
 static inline void load_llvm_pass(aflcc_state_t *aflcc, u8 *pass) {
 
-  if (getenv("AFL_SAN_NO_INST")) {
+  if (getenv("AFL_LLVM_ONLY_FSRV")) {
 
-    if (!be_quiet) { DEBUGF("SAND: Coverage instrumentation disabled\n"); }
+    if (!be_quiet) { DEBUGF("Coverage instrumentation disabled\n"); }
     return;
 
   }
 
 #if LLVM_MAJOR >= 11                                /* use new pass manager */
   #if LLVM_MAJOR < 16
+    #if LLVM_MAJOR < 15
+  insert_param(aflcc, "-fno-legacy-pass-manager");
+    #else
   insert_param(aflcc, "-fexperimental-new-pass-manager");
+    #endif
   #endif
   insert_object(aflcc, pass, "-fpass-plugin=%s", 0);
 #else
@@ -367,6 +381,8 @@ void aflcc_state_init(aflcc_state_t *aflcc, u8 *argv0) {
     be_quiet = 1;
 
   }
+
+  if (getenv("AFL_LLVM_NO_ERROR")) { aflcc->wnoerror = 1; }
 
   if ((getenv("AFL_PASSTHROUGH") || getenv("AFL_NOOPT")) && (!aflcc->debug)) {
 
@@ -511,13 +527,43 @@ u8 *find_object(aflcc_state_t *aflcc, u8 *obj) {
   if (!access(tmp, R_OK)) { return tmp; }
 
   ck_free(tmp);
-  tmp = alloc_printf("./%s", obj);
 
-  if (aflcc->debug) DEBUGF("Trying %s\n", tmp);
+  if (strlen(obj) > 2 && obj[strlen(obj) - 1] == 'h' &&
+      obj[strlen(obj) - 2] == '.') {
 
-  if (!access(tmp, R_OK)) { return tmp; }
+    tmp = alloc_printf("%s/include/%s", afl_path, obj);
 
-  ck_free(tmp);
+    if (aflcc->debug) DEBUGF("Trying %s\n", tmp);
+
+    if (!access(tmp, R_OK)) { return tmp; }
+
+    ck_free(tmp);
+
+    tmp = alloc_printf("%s/include/%s", AFL_PATH, obj);
+
+    if (aflcc->debug) DEBUGF("Trying %s\n", tmp);
+
+    if (!access(tmp, R_OK)) { return tmp; }
+
+    ck_free(tmp);
+
+    tmp = alloc_printf("%s/%s", AFL_INCLUDE_PATH, obj);
+
+    if (aflcc->debug) DEBUGF("Trying %s\n", tmp);
+
+    if (!access(tmp, R_OK)) { return tmp; }
+
+    ck_free(tmp);
+
+    tmp = alloc_printf("include/%s", obj);
+
+    if (aflcc->debug) DEBUGF("Trying %s\n", tmp);
+
+    if (!access(tmp, R_OK)) { return tmp; }
+
+    ck_free(tmp);
+
+  }
 
   if (aflcc->debug) DEBUGF("Trying ... giving up\n");
 
@@ -1449,10 +1495,13 @@ void mode_notification(aflcc_state_t *aflcc) {
   - gcc or clang
   - CLANG_BIN or LLVM_BINDIR/clang
   otherwise.
+
+  If AFL_COMPILER_LAUNCHER is set, prepend that command to the compiler.
 */
 void add_real_argv0(aflcc_state_t *aflcc) {
 
   static u8 llvm_fullpath[PATH_MAX];
+  u8       *compiler_path = NULL;
 
   if (aflcc->plusplus_mode) {
 
@@ -1481,7 +1530,7 @@ void add_real_argv0(aflcc_state_t *aflcc) {
 
     }
 
-    aflcc->cc_params[0] = alt_cxx;
+    compiler_path = alt_cxx;
 
   } else {
 
@@ -1499,6 +1548,10 @@ void add_real_argv0(aflcc_state_t *aflcc) {
 
       } else {
 
+#ifndef CLANG_BIN
+  #define CLANG_BIN "/there/is/no/clang/defined/use/LLVM_CONFIG"
+#endif
+
         if (USE_BINDIR)
           snprintf(llvm_fullpath, sizeof(llvm_fullpath), "%s/clang",
                    LLVM_BINDIR);
@@ -1510,7 +1563,29 @@ void add_real_argv0(aflcc_state_t *aflcc) {
 
     }
 
-    aflcc->cc_params[0] = alt_cc;
+    compiler_path = alt_cc;
+
+  }
+
+  u8 *cc_prefix = getenv("AFL_COMPILER_LAUNCHER");
+  if (cc_prefix) {
+
+    increment_cc_parameter_cnt(aflcc);
+
+    // Shift all existing parameters to make room for the prefix
+    for (u32 i = aflcc->cc_par_cnt; i > 0; i--) {
+
+      aflcc->cc_params[i] = aflcc->cc_params[i - 1];
+
+    }
+
+    // Insert prefix as the first parameter
+    aflcc->cc_params[0] = cc_prefix;
+    aflcc->cc_params[1] = compiler_path;
+
+  } else {
+
+    aflcc->cc_params[0] = compiler_path;
 
   }
 
@@ -1537,7 +1612,8 @@ void add_defs_selective_instr(aflcc_state_t *aflcc) {
   if (aflcc->plusplus_mode) {
 
     insert_param(aflcc,
-                 "-D__AFL_COVERAGE()=int __afl_selective_coverage = 1;"
+                 "-D__AFL_COVERAGE()=int __afl_selective_coverage "
+                 "__attribute__ ((weak)) = 1;"
                  "extern \"C\" void __afl_coverage_discard();"
                  "extern \"C\" void __afl_coverage_skip();"
                  "extern \"C\" void __afl_coverage_on();"
@@ -1546,7 +1622,8 @@ void add_defs_selective_instr(aflcc_state_t *aflcc) {
   } else {
 
     insert_param(aflcc,
-                 "-D__AFL_COVERAGE()=int __afl_selective_coverage = 1;"
+                 "-D__AFL_COVERAGE()=int __afl_selective_coverage "
+                 "__attribute__ ((weak)) = 1;"
                  "void __afl_coverage_discard();"
                  "void __afl_coverage_skip();"
                  "void __afl_coverage_on();"
@@ -2012,6 +2089,9 @@ void add_sanitizers(aflcc_state_t *aflcc, char **envp) {
 
   if (getenv("AFL_USE_TSAN") || aflcc->have_tsan) {
 
+    if (getenv("AFL_USE_ASAN") || aflcc->have_asan)
+      FATAL("ASAN and TSAN are mutually exclusive");
+
     if (!aflcc->have_fp) {
 
       insert_param(aflcc, "-fno-omit-frame-pointer");
@@ -2026,9 +2106,19 @@ void add_sanitizers(aflcc_state_t *aflcc, char **envp) {
 
   if (getenv("AFL_USE_LSAN") && !aflcc->have_lsan) {
 
+    if (getenv("AFL_USE_TSAN") || aflcc->have_tsan)
+      FATAL("TSAN and LSAN are mutually exclusive");
+
     insert_param(aflcc, "-fsanitize=leak");
     add_defs_lsan_ctrl(aflcc);
     aflcc->have_lsan = 1;
+
+  }
+
+  if (getenv("AFL_USE_RTSAN") && !aflcc->have_rtsan) {
+
+    insert_param(aflcc, "-fsanitize=realtime");
+    aflcc->have_rtsan = 1;
 
   }
 
@@ -2087,7 +2177,7 @@ void add_native_pcguard(aflcc_state_t *aflcc) {
    * anyway.
    */
   if (aflcc->have_rust_asanrt) { return; }
-  if (getenv("AFL_SAN_NO_INST")) {
+  if (getenv("AFL_LLVM_ONLY_FSRV")) {
 
     if (!be_quiet) { DEBUGF("SAND: Coverage instrumentation disabled\n"); }
     return;
@@ -2128,7 +2218,7 @@ void add_native_pcguard(aflcc_state_t *aflcc) {
 */
 void add_optimized_pcguard(aflcc_state_t *aflcc) {
 
-  if (getenv("AFL_SAN_NO_INST")) {
+  if (getenv("AFL_LLVM_ONLY_FSRV")) {
 
     if (!be_quiet) { DEBUGF("SAND: Coverage instrumentation disabled\n"); }
     return;
@@ -2157,7 +2247,11 @@ void add_optimized_pcguard(aflcc_state_t *aflcc) {
 
     /* Since LLVM_MAJOR >= 13 we use new pass manager */
     #if LLVM_MAJOR < 16
+      #if LLVM_MAJOR < 15
+    insert_param(aflcc, "-fno-legacy-pass-manager");
+      #else
     insert_param(aflcc, "-fexperimental-new-pass-manager");
+      #endif
     #endif
     insert_object(aflcc, "SanitizerCoveragePCGUARD.so", "-fpass-plugin=%s", 0);
 
@@ -2408,7 +2502,9 @@ void add_lto_passes(aflcc_state_t *aflcc) {
   insert_object(aflcc, "SanitizerCoverageLTO.so", "-Wl,-mllvm=-load=%s", 0);
 #endif
 
+#ifndef __APPLE__
   insert_param(aflcc, "-Wl,--allow-multiple-definition");
+#endif
 
 }
 
@@ -2586,6 +2682,13 @@ void add_assembler(aflcc_state_t *aflcc) {
 /* Add params to launch the gcc plugins for instrumentation. */
 void add_gcc_plugin(aflcc_state_t *aflcc) {
 
+  if (getenv("AFL_GCC_ONLY_FSRV")) {
+
+    if (!be_quiet) { DEBUGF("SAND: Coverage instrumentation disabled\n"); }
+    return;
+
+  }
+
   if (aflcc->cmplog_mode) {
 
     insert_object(aflcc, "afl-gcc-cmplog-pass.so", "-fplugin=%s", 0);
@@ -2673,6 +2776,16 @@ void add_misc_params(aflcc_state_t *aflcc) {
 
   }
 
+#if LLVM_MAJOR == 18
+  if (aflcc->compiler_mode != GCC && aflcc->compiler_mode != GCC_PLUGIN) {
+
+    insert_param(aflcc, "-fno-record-command-line");
+    insert_param(aflcc, "-gno-record-command-line");
+
+  }
+
+#endif
+
 }
 
 /*
@@ -2728,7 +2841,9 @@ param_st parse_misc_params(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
 
     SCAN_KEEP(aflcc->preprocessor_only, 1);
 
-  } else if (!strcmp(cur_argv, "--target=wasm32-wasi")) {
+  } else if (!strcmp(cur_argv, "--target=wasm32-wasi") ||
+
+             !strcmp(cur_argv, "--target=wasm32-wasip1")) {
 
     SCAN_KEEP(aflcc->passthrough, 1);
 
@@ -2795,10 +2910,7 @@ param_st parse_misc_params(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
     else
       final_ = PARAM_DROP;
 
-  } else if (!strncmp(cur_argv, "-stdlib=", 8) &&
-
-             (aflcc->compiler_mode == GCC ||
-              aflcc->compiler_mode == GCC_PLUGIN)) {
+  } else if (!strcmp(cur_argv, "-Werror") && aflcc->wnoerror) {
 
     if (scan) {
 
@@ -2811,15 +2923,53 @@ param_st parse_misc_params(aflcc_state_t *aflcc, u8 *cur_argv, u8 scan) {
 
     }
 
-  } else if (cur_argv[0] != '-') {
+  } else
 
-    /* It's a weak, loose pattern, with very different purpose
-     than others. We handle it at last, cautiously and robustly. */
+      if (!strncmp(cur_argv, "-stdlib=", 8) &&
 
-    if (scan && cur_argv[0] != '@')  // response file support
-      aflcc->non_dash = 1;
+          (aflcc->compiler_mode == GCC || aflcc->compiler_mode == GCC_PLUGIN)) {
 
-  }
+    if (scan) {
+
+      final_ = PARAM_SCAN;
+
+    } else {
+
+      if (!be_quiet) WARNF("Found '%s' - stripping!", cur_argv);
+      final_ = PARAM_DROP;
+
+    }
+
+  } else
+
+    /* args we want to remove that are gcc specific when we use clang */
+
+    if ((!strcmp(cur_argv,
+
+                 "-Wno-missing-template-arg-list-after-template-kw") ||
+         !strcmp(cur_argv, "-Wno-dangling-assignment-gsl")) &&
+
+        (aflcc->compiler_mode != GCC && aflcc->compiler_mode != GCC_PLUGIN)) {
+
+      if (scan) {
+
+        final_ = PARAM_SCAN;
+
+      } else {
+
+        final_ = PARAM_DROP;
+
+      }
+
+    } else if (cur_argv[0] != '-') {
+
+      /* It's a weak, loose pattern, with very different purpose
+       than others. We handle it at last, cautiously and robustly. */
+
+      if (scan && cur_argv[0] != '@')  // response file support
+        aflcc->non_dash = 1;
+
+    }
 
 #undef SCAN_KEEP
 
@@ -2959,6 +3109,7 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
           "  AFL_DONT_OPTIMIZE: disable optimization instead of -O3\n"
           "  AFL_NO_BUILTIN: no builtins for string compare functions (for "
           "libtokencap.so)\n"
+          "  AFL_LLVM_NO_ERROR: strip out -Werror\n"
           "  AFL_NOOPT: behave like a normal compiler (to pass configure "
           "tests)\n"
           "  AFL_PATH: path to instrumenting pass and runtime  "
@@ -2972,7 +3123,10 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
           "  AFL_USE_MSAN: activate memory sanitizer\n"
           "  AFL_USE_UBSAN: activate undefined behaviour sanitizer\n"
           "  AFL_USE_TSAN: activate thread sanitizer\n"
-          "  AFL_USE_LSAN: activate leak-checker sanitizer\n");
+          "  AFL_USE_LSAN: activate leak-checker sanitizer\n"
+          "  AFL_USE_RTSAN: activate realtime sanitizer\n"
+          "  AFL_COMPILER_LAUNCHER: prepend command to compiler invocations "
+          "(e.g., ccache)\n");
 
       if (aflcc->have_gcc_plugin)
         SAYF(
@@ -3009,6 +3163,8 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
             "  AFL_LLVM_INJECTIONS_SQL: enables SQL injections hooking\n"
             "  AFL_LLVM_INJECTIONS_LDAP: enables LDAP injections hooking\n"
             "  AFL_LLVM_INJECTIONS_XSS: enables XSS injections hooking\n"
+            "  AFL_LLVM_IJON: enable IJON max tracking (auto-detects "
+            "_USE_IJON)\n"
             "  AFL_LLVM_LAF_ALL: enables all LAF splits/transforms\n"
             "  AFL_LLVM_LAF_SPLIT_COMPARES: enable cascaded comparisons\n"
             "  AFL_LLVM_LAF_SPLIT_COMPARES_BITW: size limit (default 8)\n"
@@ -3016,6 +3172,7 @@ static void maybe_usage(aflcc_state_t *aflcc, int argc, char **argv) {
             "  AFL_LLVM_LAF_SPLIT_FLOATS: cascaded comparisons on floats\n"
             "  AFL_LLVM_LAF_TRANSFORM_COMPARES: cascade comparisons for string "
             "functions\n"
+            "  AFL_LLVM_DENY_EXEC: if set, abort on exec* calls\n"
             "  AFL_LLVM_ALLOWLIST/AFL_LLVM_DENYLIST: enable "
             "instrument allow/\n"
             "    deny listing (selective instrumentation)\n");
@@ -3413,6 +3570,71 @@ static void process_params(aflcc_state_t *aflcc, u8 scan, u32 argc,
 
 }
 
+/* Helper function to extract source filename from compilation arguments */
+static const char *get_source_filename(u32 argc, char **argv) {
+
+  for (u32 i = 1; i < argc; i++) {
+
+    char *arg = argv[i];
+    if (arg && arg[0] != '-') {  // Not a flag
+      char *ext = strrchr(arg, '.');
+      if (ext && (strcmp(ext, ".c") == 0 || strcmp(ext, ".cpp") == 0 ||
+                  strcmp(ext, ".cc") == 0 || strcmp(ext, ".cxx") == 0 ||
+                  strcmp(ext, ".C") == 0 || strcmp(ext, ".h") == 0 ||
+                  strcmp(ext, ".hpp") == 0 || strcmp(ext, ".hh") == 0 ||
+                  strcmp(ext, ".hxx") == 0 || strcmp(ext, ".H") == 0)) {
+
+        return arg;
+
+      }
+
+    }
+
+  }
+
+  return NULL;
+
+}
+
+/* Check if source file contains IJON usage patterns */
+static u8 file_contains_ijon_usage(const char *source_file) {
+
+  if (!source_file) return 0;
+
+  FILE *f = fopen(source_file, "r");
+  if (!f) return 0;
+
+  char line[2048];
+  u8   found_ijon = 0;
+
+  while (fgets(line, sizeof(line), f)) {
+
+    // Look for IJON patterns
+    if (strstr(line, "#ifdef _USE_IJON") ||
+        strstr(line, "#if defined(_USE_IJON)") || strstr(line, "ijon_max(") ||
+        strstr(line, "ijon_min(") || strstr(line, "ijon_set(") ||
+        strstr(line, "ijon_inc(") || strstr(line, "ijon_xor_state(") ||
+        strstr(line, "ijon_reset_state(") || strstr(line, "IJON_MAX(") ||
+        strstr(line, "IJON_MIN(") || strstr(line, "IJON_SET(") ||
+        strstr(line, "IJON_INC(") || strstr(line, "IJON_STATE(") ||
+        strstr(line, "IJON_CTX(") || strstr(line, "IJON_MAX_AT(") ||
+        strstr(line, "IJON_MIN_AT(") || strstr(line, "IJON_BITS(") ||
+        strstr(line, "IJON_STRDIST(") || strstr(line, "IJON_DIST(") ||
+        strstr(line, "IJON_CMP(") || strstr(line, "IJON_STACK_MAX(") ||
+        strstr(line, "IJON_STACK_MIN(")) {
+
+      found_ijon = 1;
+      break;
+
+    }
+
+  }
+
+  fclose(f);
+  return found_ijon;
+
+}
+
 /* Process each of the existing argv, also add a few new args. */
 static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
                         char **envp) {
@@ -3531,7 +3753,56 @@ static void edit_params(aflcc_state_t *aflcc, u32 argc, char **argv,
 
     }
 
-    // insert_param(aflcc, "-Qunused-arguments");
+    /* Load IJON instrumentation pass when AFL_LLVM_IJON is enabled */
+    if (getenv("AFL_LLVM_IJON")) {
+
+      load_llvm_pass(aflcc, "afl-llvm-ijon-pass.so");
+
+    }
+
+    /* Include IJON header only for files that actually use IJON */
+    if (getenv("AFL_LLVM_IJON")) {
+
+      insert_param(aflcc, "-fpermissive");
+#ifndef __APPLE__
+      insert_param(aflcc, "-Wl,--allow-multiple-definition");
+#endif
+
+      const char *source_file = get_source_filename(argc, argv);
+
+      if (source_file && file_contains_ijon_usage(source_file)) {
+
+        u8 *ijon_header = find_object(aflcc, "afl-ijon-min.h");
+        if (ijon_header) {
+
+          insert_param(aflcc, "-include");
+          insert_param(aflcc, ijon_header);
+          insert_param(aflcc, "-D_USE_IJON=1");  // Define the macro
+
+          if (getenv("AFL_DEBUG")) {
+
+            SAYF("Including IJON header for file: %s\n", source_file);
+
+          }
+
+        } else {
+
+          WARNF("IJON header not found for file: %s", source_file);
+
+        }
+
+      } else {
+
+        if (getenv("AFL_DEBUG") && source_file) {
+
+          SAYF("Skipping IJON header for file: %s (no IJON usage detected)\n",
+               source_file);
+
+        }
+
+      }
+
+    }
 
   }
 
@@ -3583,6 +3854,64 @@ int main(int argc, char **argv, char **envp) {
         "afl-clang-fast/afl-gcc-fast for instrumentation instead.");
 
   }
+
+  // We only support plugins with LLVM 14 onwards
+#if LLVM_MAJOR < 14
+  if (aflcc->instrument_mode != INSTRUMENT_LLVMNATIVE &&
+      aflcc->compiler_mode != GCC_PLUGIN) {
+
+    aflcc->instrument_mode = INSTRUMENT_LLVMNATIVE;
+    aflcc->compiler_mode = LLVM;
+
+  }
+
+  if (aflcc->compiler_mode == LLVM) {
+
+    if (aflcc->cmplog_mode) {
+
+      WARNF("CMPLOG support requires LLVM 14+");
+      aflcc->cmplog_mode = 0;
+
+    }
+
+    if (getenv("AFL_LLVM_DICT2FILE")) {
+
+      WARNF("DICT2FILE support requires LLVM14+");
+      unsetenv("AFL_LLVM_DICT2FILE");
+
+    }
+
+    if (getenv("AFL_LLVM_LAF_SPLIT_SWITCHES") ||
+        getenv("AFL_LLVM_LAF_SPLIT_COMPARES") ||
+        getenv("AFL_LLVM_LAF_SPLIT_FLOATS") ||
+        getenv("AFL_LLVM_LAF_TRANSFORM_COMPARES") ||
+        getenv("AFL_LLVM_LAF_ALL")) {
+
+      WARNF("AFL_LLVM_LAF support requires LLVM14+");
+      unsetenv("AFL_LLVM_LAF_SPLIT_SWITCHES");
+      unsetenv("AFL_LLVM_LAF_SPLIT_COMPARES");
+      unsetenv("AFL_LLVM_LAF_SPLIT_FLOATS");
+      unsetenv("AFL_LLVM_LAF_TRANSFORM_COMPARES");
+      unsetenv("AFL_LLVM_LAF_ALL");
+
+    }
+
+    if (getenv("AFL_LLVM_INJECTIONS_ALL") ||
+        getenv("AFL_LLVM_INJECTIONS_SQL") ||
+        getenv("AFL_LLVM_INJECTIONS_LDAP") ||
+        getenv("AFL_LLVM_INJECTIONS_XSS")) {
+
+      WARNF("AFL_LLVM_INJECTIONS support requires LLVM14+");
+      unsetenv("AFL_LLVM_INJECTIONS_ALL");
+      unsetenv("AFL_LLVM_INJECTIONS_SQL");
+      unsetenv("AFL_LLVM_INJECTIONS_LDAP");
+      unsetenv("AFL_LLVM_INJECTIONS_XSS");
+
+    }
+
+  }
+
+#endif
 
   mode_notification(aflcc);
 

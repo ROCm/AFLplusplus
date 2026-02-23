@@ -28,8 +28,11 @@
 #ifndef __AFL_FORKSERVER_H
 #define __AFL_FORKSERVER_H
 
-#include <stdio.h>
+#include <fcntl.h>                                      /*< provides mode_t */
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 #include "types.h"
 
@@ -137,13 +140,21 @@ typedef struct afl_forkserver {
 
   u8 last_kill_signal;                  /* Signal that killed the child     */
 
+  u8 last_exit_code;               /* Child exit code if counted as a crash */
+
+  bool allow_cores;                   /* allow core files on target crashes */
+
   bool use_shmem_fuzz;                  /* use shared mem for test cases    */
 
   bool support_shmem_fuzz;              /* set by afl-fuzz                  */
 
+  bool use_ijon;                        /* use IJON tracking feature        */
+
   bool use_fauxsrv;                     /* Fauxsrv for non-forking targets? */
 
   bool qemu_mode;                       /* if running in qemu mode or not   */
+
+  bool unicorn_mode;                    /* if running in unicorn mode or not*/
 
   bool frida_mode;                     /* if running in frida mode or not   */
 
@@ -155,7 +166,9 @@ typedef struct afl_forkserver {
 
   bool no_unlink;                       /* do not unlink cur_input          */
 
-  bool uses_asan;                       /* Target uses ASAN?                */
+  u8 uses_asan;     /* Target uses ASAN/LSAN/MSAN? (bit 0/1/2 respectively) */
+
+  bool setenv;                  /* setenv() to discriminate the forkserver? */
 
   bool debug;                           /* debug mode?                      */
 
@@ -182,6 +195,16 @@ typedef struct afl_forkserver {
   u32 *persistent_record_len;
   s32  persistent_record_pid;
 #endif
+
+  u8     uid_set;
+  uid_t  uid;
+  u8     gid_set;
+  pid_t  gid;
+  u16    nb_supl_gids;
+  pid_t *supl_gids;
+
+  mode_t perm;
+  u8     chown_needed;
 
   /* Function to kick off the forkserver child */
   void (*init_child_func)(struct afl_forkserver *fsrv, char **argv);
@@ -212,6 +235,11 @@ typedef struct afl_forkserver {
   char                 *nyx_tmp_workdir_path;
   s32                   nyx_log_fd;
   u64                   nyx_target_hash64;
+
+  bool gui_mode;                        /* if running in GUI mode or not    */
+  s32  gui_python_pid;                  /* PID of python interactor         */
+  u8  *gui_python_dir;                  /* location of python interactor    */
+
 #endif
 
 #ifdef __AFL_CODE_COVERAGE
@@ -238,6 +266,7 @@ typedef enum fsrv_run_result {
 
 void afl_fsrv_init(afl_forkserver_t *fsrv);
 void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from);
+void afl_fsrv_setup_preload(afl_forkserver_t *fsrv, char *argv0);
 void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
                     volatile u8 *stop_soon_p, u8 debug_child_output);
 u32  afl_fsrv_get_mapsize(afl_forkserver_t *fsrv, char **argv,
@@ -248,6 +277,9 @@ fsrv_run_result_t afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
 void              afl_fsrv_killall(void);
 void              afl_fsrv_deinit(afl_forkserver_t *fsrv);
 void              afl_fsrv_kill(afl_forkserver_t *fsrv);
+void              afl_fsrv_resize_mapsize(afl_forkserver_t *fsrv, void *shm_p,
+                                          char **use_argv, u32 map_size,
+                                          volatile u8 *stop_soon, bool unicorn_mode);
 
 #ifdef __linux__
 void nyx_load_target_hash(afl_forkserver_t *fsrv);

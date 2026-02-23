@@ -26,8 +26,6 @@
 
 /* This file roughly follows afl-fuzz-asanfuzz */
 
-#include <sys/select.h>
-
 #include "afl-fuzz.h"
 
 void sanfuzz_exec_child(afl_forkserver_t *fsrv, char **argv) {
@@ -39,6 +37,9 @@ void sanfuzz_exec_child(afl_forkserver_t *fsrv, char **argv) {
 
   }
 
+  // In case users provide the normally instrumented binaries, this servers as
+  // the last resort to avoid collecting incorrect coverage.
+  setenv("AFL_LLVM_ONLY_FSRV", "1", 0);
   execv(fsrv->target_path, argv);
 
 }

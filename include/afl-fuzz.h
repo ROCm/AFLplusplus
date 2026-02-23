@@ -46,6 +46,8 @@
 #include "forkserver.h"
 #include "common.h"
 
+#include "afl-ijon-min.h"
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -180,6 +182,58 @@ struct havoc_profile {
 
 };
 
+/* Frameshift */
+
+// A single frameshift relation field.
+typedef struct fs_relation {
+
+  // Dynamic values:
+  u64 pos;
+  u64 val;
+  u64 anchor;
+  u64 insert;
+
+  // Backup to perform revert.
+  u64 _old_pos;
+  u64 _old_val;
+  u64 _old_anchor;
+  u64 _old_insert;
+
+  // Fixed values:
+  u8 size;
+  u8 le;
+  u8 enabled;
+
+} fs_relation_t;
+
+typedef struct fs_idx_vec {
+
+  u32 *idx;
+  u32  count;
+  u32  capacity;
+
+} fs_idx_vec_t;
+
+// Per-input metadata.
+typedef struct fs_meta {
+
+  fs_relation_t *relations;
+  u32            rel_count;
+  u32            rel_capacity;
+
+  u8 *blocked_points_map;               /* bitmap of blocked points         */
+
+} fs_meta_t;
+
+struct frameshift_stats {
+
+  u32 searched;
+  u32 found;
+  u64 search_tests;
+  u64 total_time_ms;
+
+};
+
 struct skipdet_entry {
 
   u8  continue_inf, done_eff;
@@ -256,6 +310,11 @@ struct queue_entry {
   u8                 *cmplog_colorinput; /* the result buf of colorization   */
   struct tainted     *taint;             /* Taint information from CmpLog    */
   struct skipdet_entry *skipdet_e;
+
+  u8 fs_status;                         /* Frameshift status                */
+                      /*   0: unexplored                  */
+                      /*   1: explored                    */
+  fs_meta_t *fs_meta;                   /* Frameshift metadata              */
 
 };
 
@@ -352,6 +411,8 @@ enum {
   POWER_SCHEDULES_NUM
 
 };
+
+#define FAST_RESUME_VERSION 0x01000000
 
 /* Python stuff */
 #ifdef USE_PYTHON
@@ -460,7 +521,10 @@ typedef struct afl_env_vars {
       afl_no_startup_calibration, afl_no_warn_instability,
       afl_post_process_keep_original, afl_crashing_seeds_as_new_crash,
       afl_final_sync, afl_ignore_seed_problems, afl_disable_redundant,
-      afl_sha1_filenames, afl_no_sync, afl_no_fastresume;
+      afl_sha1_filenames, afl_no_sync, afl_no_fastresume, afl_force_fastresume,
+      afl_forksrv_uid_set, afl_forksrv_gid_set, afl_frameshift_disabled;
+
+  u16 afl_forksrv_nb_supl_gids;
 
   u8 *afl_tmpdir, *afl_custom_mutator_library, *afl_python_module, *afl_path,
       *afl_hang_tmout, *afl_forksrv_init_tmout, *afl_preload,
@@ -469,7 +533,15 @@ typedef struct afl_env_vars {
       *afl_testcache_entries, *afl_child_kill_signal, *afl_fsrv_kill_signal,
       *afl_target_env, *afl_persistent_record, *afl_exit_on_time;
 
-  s32 afl_pizza_mode;
+  s32 afl_pizza_mode, afl_ijon_history_limit;
+
+  uid_t afl_forksrv_uid;
+
+  gid_t afl_forksrv_gid;
+
+  gid_t *afl_forksrv_supl_gids;
+
+  double afl_frameshift_max_overhead;           /* 0.0 to 1.0, default 0.10 */
 
 } afl_env_vars_t;
 
@@ -496,6 +568,10 @@ typedef struct afl_state {
   sharedmem_t      shm;
   sharedmem_t     *shm_fuzz;
   afl_env_vars_t   afl_env;
+#ifdef __AFL_CODE_COVERAGE
+  sharedmem_t shm_pcmap;                         /* Shared memory for pcmap */
+  sharedmem_t shm_modmap;                       /* Shared memory for modmap */
+#endif
 
   char **argv;                                            /* argv if needed */
 
@@ -552,6 +628,10 @@ typedef struct afl_state {
       *file_extension,                  /* File extension                   */
       *orig_cmdline,                    /* Original command line            */
       *infoexec;                       /* Command to execute on a new crash */
+
+  mode_t perm,                       /* File permission when creating files */
+      dir_perm;                /* File permission when creating directories */
+  u8 chown_needed;             /* Group owner of files needs to be modified */
 
   u32 hang_tmout,                       /* Timeout used for hang det (ms)   */
       stats_update_freq;                /* Stats update frequency (execs)   */
@@ -678,6 +758,7 @@ typedef struct afl_state {
   u32 stage_cur, stage_max;             /* Stage progression                */
   s32 splicing_with;                    /* Splicing with which test case?   */
   s64 smallest_favored;                 /* smallest queue id favored        */
+  s32 afl_ijon_history_limit;           /* IJON history buffer limit        */
 
   u32 main_node_id, main_node_max;      /*   Main instance job splitting    */
 
@@ -718,6 +799,8 @@ typedef struct afl_state {
   struct queue_entry **queue_buf;
 
   struct queue_entry **top_rated;           /* Top entries for bitmap bytes */
+
+  u32 **top_rated_candidates;             /* Candidate IDs per bitmap index */
 
   struct extra_data *extras;            /* Extra tokens to fuzz with        */
   u32                extras_cnt;        /* Total number of tokens read      */
@@ -766,6 +849,7 @@ typedef struct afl_state {
 #define FOREIGN_SYNCS_MAX 32U
   u8                  foreign_sync_cnt;
   struct foreign_sync foreign_syncs[FOREIGN_SYNCS_MAX];
+  char               *foreign_file;
 
 #ifdef _AFL_DOCUMENT_MUTATIONS
   u8  do_document;
@@ -858,7 +942,13 @@ typedef struct afl_state {
   /* Global Profile Data for deterministic/havoc-splice stage */
   struct havoc_profile *havoc_prof;
 
+  struct frameshift_stats fs_stats;
+  u32       *frameshift_index_buffer;        /* Buffer for frameshift index */
+  fs_meta_t *fs_curr_meta;    /* Metadata for the current input (full copy) */
+
   struct skipdet_global *skipdet_g;
+
+  s64 last_scored_idx;           /* Index of the last queue entry re-scored */
 
 #ifdef INTROSPECTION
   char  mutation[8072];
@@ -866,6 +956,15 @@ typedef struct afl_state {
   FILE *introspection_file;
   u32   bitsmap_size;
 #endif
+  /* IJON max tracking state */
+  ijon_min_state *ijon_state;                /* IJON input management state */
+  u64            *ijon_bits;            /* Pointer to IJON max tracking map */
+  time_t          last_ijon_log_time;   /* Rate limiting for IJON UI output */
+  u8             *ijon_input_data;    /* Currently executed IJON input data */
+  u32             ijon_input_len; /* Length of currently executed IJON input */
+  u8              is_doing_ijon;      /* Flag to track IJON execution state */
+  dynamic_shared_access_t
+      *ijon_shared_access;         /* IJON shared access for dynamic offset */
 
 } afl_state_t;
 
@@ -1133,6 +1232,7 @@ struct custom_mutator {
 
 void afl_state_init(afl_state_t *, uint32_t map_size);
 void afl_state_deinit(afl_state_t *);
+void afl_resize_map_buffers(afl_state_t *, u32 old_size, u32 new_size);
 
 /* Set stop_soon flag on all children, kill all children */
 void afl_states_stop(void);
@@ -1174,7 +1274,7 @@ u8          havoc_mutation_probability_py(void *);
 u8          queue_get_py(void *, const u8 *);
 const char *introspection_py(void *);
 u8          queue_new_entry_py(void *, const u8 *, const u8 *);
-void        splice_optout(void *);
+void        splice_optout_py(void *);
 void        deinit_py(void *);
 
 #endif
@@ -1182,13 +1282,13 @@ void        deinit_py(void *);
 /* Queue */
 
 void mark_as_det_done(afl_state_t *, struct queue_entry *);
-void mark_as_variable(afl_state_t *, struct queue_entry *);
-void mark_as_redundant(afl_state_t *, struct queue_entry *, u8);
 void add_to_queue(afl_state_t *, u8 *, u32, u8);
 void destroy_queue(afl_state_t *);
-void update_bitmap_score(afl_state_t *, struct queue_entry *);
+void update_bitmap_score(afl_state_t *, struct queue_entry *, bool);
 void cull_queue(afl_state_t *);
 u32  calculate_score(afl_state_t *, struct queue_entry *);
+void recalculate_all_scores(afl_state_t *);
+void update_bitmap_rescore(afl_state_t *, struct queue_entry *, u32);
 
 /* Bitmap */
 
@@ -1209,9 +1309,16 @@ u8 *describe_op(afl_state_t *, u8, size_t);
 #endif
 u8 save_if_interesting(afl_state_t *, void *, u32, u8);
 u8 has_new_bits(afl_state_t *, u8 *);
-u8 has_new_bits_unclassified(afl_state_t *, u8 *);
 #ifndef AFL_SHOWMAP
 void classify_counts(afl_forkserver_t *);
+#endif
+
+#ifdef __AFL_CODE_COVERAGE
+void afl_pcmap_init(afl_state_t *, u32);
+void afl_pcmap_resize(afl_state_t *, u32);
+void afl_modmap_init(afl_state_t *);
+void afl_dump_pc_map(afl_state_t *);
+void afl_dump_module_map(afl_state_t *);
 #endif
 
 /* Extras */
@@ -1233,6 +1340,7 @@ void write_setup_file(afl_state_t *, u32, char **);
 void write_stats_file(afl_state_t *, u32, double, double, double);
 void maybe_update_plot_file(afl_state_t *, u32, double, double);
 void write_queue_stats(afl_state_t *);
+void make_space_for_stats();
 void show_stats(afl_state_t *);
 void show_stats_normal(afl_state_t *);
 void show_stats_pizza(afl_state_t *);
@@ -1252,6 +1360,7 @@ int  statsd_format_metric(afl_state_t *afl, char *buff, size_t bufflen);
 
 /* Run */
 
+void check_sync_fuzzers(afl_state_t *);
 void sync_fuzzers(afl_state_t *);
 u32  write_to_testcase(afl_state_t *, void **, u32, u32);
 u8   calibrate_case(afl_state_t *, struct queue_entry *, u8 *, u32, u8);
@@ -1272,7 +1381,6 @@ u8   fuzz_one(afl_state_t *);
 #ifdef HAVE_AFFINITY
 void bind_to_free_cpu(afl_state_t *);
 #endif
-void   setup_post(afl_state_t *);
 void   read_testcases(afl_state_t *, u8 *);
 void   perform_dry_run(afl_state_t *);
 void   pivot_inputs(afl_state_t *);
@@ -1323,6 +1431,15 @@ u8 is_det_timeout(u64, u8);
 
 void plot_profile_data(afl_state_t *, struct queue_entry *);
 
+/* Frameshift functions */
+void frameshift_stage(afl_state_t *);
+void fs_sanitize(fs_meta_t *, u8 *buf);
+void fs_save(fs_meta_t *meta);
+void fs_restore(fs_meta_t *meta);
+int fs_track_insert(fs_meta_t *meta, u64 idx, u64 data_size, u8 ignore_invalid);
+void fs_track_delete(fs_meta_t *meta, u64 idx, u64 data_size);
+void fs_clone_meta(afl_state_t *afl);
+
 /**** Inline routines ****/
 
 /* Generate a random number (from 0 to limit - 1). This may
@@ -1338,7 +1455,6 @@ static inline u32 rand_below(afl_state_t *afl, u32 limit) {
 
     ck_read(afl->fsrv.dev_urandom_fd, &afl->rand_seed, sizeof(afl->rand_seed),
             "/dev/urandom");
-    // srandom(afl->rand_seed[0]);
     afl->rand_cnt = (RESEED_RNG / 2) + (afl->rand_seed[1] % RESEED_RNG);
 
   }
@@ -1437,7 +1553,7 @@ char *sha1_hex_for_file(const char *fname, u32 len);
  * enabled. */
 static inline int permissive_create(afl_state_t *afl, const char *fn) {
 
-  int fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, DEFAULT_PERMISSION);
+  int fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, afl->perm);
   if (unlikely(fd < 0)) {
 
     if (!(afl->afl_env.afl_sha1_filenames && errno == EEXIST)) {
@@ -1448,7 +1564,25 @@ static inline int permissive_create(afl_state_t *afl, const char *fn) {
 
   }
 
+  if (afl->chown_needed) {
+
+    if (fchown(fd, -1, afl->fsrv.gid) == -1) { PFATAL("fchown() failed"); }
+
+  }
+
   return fd;
+
+}
+
+static inline void bitmap_set(u8 *map, u32 index) {
+
+  map[index / 8] |= (1u << (index % 8));
+
+}
+
+static inline u8 bitmap_read(u8 *map, u32 index) {
+
+  return (map[index / 8] >> (index % 8)) & 1;
 
 }
 

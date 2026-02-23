@@ -28,8 +28,13 @@
 #include "envs.h"
 #include <limits.h>
 
-static char fuzzing_state[4][12] = {"started :-)", "in progress", "final phase",
-                                    "finished..."};
+//  7 is the number of characters in a color control code
+// 11 is the number of characters in the fuzzing state itself
+//  5 is the number of characters in `cRST`
+//  1 is for the null character
+static char fuzzing_state[4][7 + 11 + 5 + 1] = {
+
+    "started :-)", "in progress", "final phase", cRED "finished..." cRST};
 
 char *get_fuzzing_state(afl_state_t *afl) {
 
@@ -54,13 +59,13 @@ char *get_fuzzing_state(afl_state_t *afl) {
     u64 percent_cur = last_find_100 / cur_run_time;
     u64 percent_total = last_find_100 / cur_total_run_time;
 
-    if (unlikely(percent_cur >= 80 && percent_total >= 80)) {
+    if (unlikely(percent_cur >= 75 && percent_total >= 75)) {
 
       if (unlikely(afl->afl_env.afl_exit_when_done)) { afl->stop_soon = 2; }
 
       return fuzzing_state[3];
 
-    } else if (unlikely(percent_cur >= 55 && percent_total >= 55)) {
+    } else if (unlikely(percent_cur >= 50 && percent_total >= 50)) {
 
       return fuzzing_state[2];
 
@@ -81,7 +86,13 @@ void write_setup_file(afl_state_t *afl, u32 argc, char **argv) {
   u8 fn[PATH_MAX], fn2[PATH_MAX];
 
   snprintf(fn2, PATH_MAX, "%s/target_hash", afl->out_dir);
-  FILE *f2 = create_ffile(fn2);
+  FILE *f2 = create_ffile(fn2, afl->perm);
+
+  if (afl->chown_needed) {
+
+    if (chown(fn2, -1, afl->fsrv.gid) == -1) { PFATAL("chown() failed"); }
+
+  }
 
 #ifdef __linux__
   if (afl->fsrv.nyx_mode) {
@@ -101,8 +112,14 @@ void write_setup_file(afl_state_t *afl, u32 argc, char **argv) {
   fclose(f2);
 
   snprintf(fn, PATH_MAX, "%s/fuzzer_setup", afl->out_dir);
-  FILE *f = create_ffile(fn);
+  FILE *f = create_ffile(fn, afl->perm);
   u32   i;
+
+  if (afl->chown_needed) {
+
+    if (chown(fn, -1, afl->fsrv.gid) == -1) { PFATAL("chown() failed"); }
+
+  }
 
   fprintf(f, "# environment variables:\n");
   u32 s_afl_env = (u32)sizeof(afl_environment_variables) /
@@ -318,7 +335,13 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
   snprintf(fn_tmp, PATH_MAX, "%s/.fuzzer_stats_tmp", afl->out_dir);
   snprintf(fn_final, PATH_MAX, "%s/fuzzer_stats", afl->out_dir);
-  f = create_ffile(fn_tmp);
+  f = create_ffile(fn_tmp, afl->perm);
+
+  if (afl->chown_needed) {
+
+    if (chown(fn_tmp, -1, afl->fsrv.gid) == -1) { PFATAL("fchown() failed"); }
+
+  }
 
   /* Keep last values in case we're called from another context
      where exec/sec stats and such are not readily available. */
@@ -604,6 +627,8 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
 void plot_profile_data(afl_state_t *afl, struct queue_entry *q) {
 
+  if (afl->skip_deterministic) { return; }
+
   u64 current_ms = get_cur_time() - afl->start_time;
 
   u32    current_edges = count_non_255_bytes(afl, afl->virgin_bits);
@@ -635,6 +660,19 @@ void plot_profile_data(afl_state_t *afl, struct queue_entry *q) {
           afl->skipdet_g->undet_bits_threshold, q->skipdet_e->continue_inf);
 
   fflush(afl->fsrv.det_plot_file);
+
+}
+
+/* Scroll the terminal so when the stats clear the screen
+   we don't delete anything. */
+
+void make_space_for_stats() {
+
+  struct winsize ws;
+
+  if (ioctl(1, TIOCGWINSZ, &ws)) { return; }
+
+  SAYF("\x1b[%dS", ws.ws_row);
 
 }
 
@@ -877,10 +915,6 @@ void show_stats_normal(afl_state_t *afl) {
 
   if (unlikely(!afl->queue_cur)) { return; }
 
-  /* Compute some mildly useful bitmap stats. */
-
-  t_bits = (afl->fsrv.map_size << 3) - count_bits(afl, afl->virgin_bits);
-
   /* Now, for the visuals... */
 
   if (afl->clear_screen) {
@@ -903,6 +937,10 @@ void show_stats_normal(afl_state_t *afl) {
     return;
 
   }
+
+  /* Compute some mildly useful bitmap stats. */
+
+  t_bits = (afl->fsrv.map_size << 3) - count_bits(afl, afl->virgin_bits);
 
   /* Let's start by drawing a centered banner. */
   if (unlikely(!banner[0])) {
@@ -1702,10 +1740,6 @@ void show_stats_pizza(afl_state_t *afl) {
 
   if (unlikely(!afl->queue_cur)) { return; }
 
-  /* Compute some mildly useful bitmap stats. */
-
-  t_bits = (afl->fsrv.map_size << 3) - count_bits(afl, afl->virgin_bits);
-
   /* Now, for the visuals... */
 
   if (afl->clear_screen) {
@@ -1729,6 +1763,10 @@ void show_stats_pizza(afl_state_t *afl) {
     return;
 
   }
+
+  /* Compute some mildly useful bitmap stats. */
+
+  t_bits = (afl->fsrv.map_size << 3) - count_bits(afl, afl->virgin_bits);
 
   /* Let's start by drawing a centered banner. */
   if (unlikely(!banner[0])) {

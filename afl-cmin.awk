@@ -1,12 +1,14 @@
 #!/usr/bin/env sh
+THISPATH=`dirname ${0}`
+
 SYS=$(uname -s)
 test "$SYS" = "Darwin" && {
   echo Error: afl-cmin does not work on Apple currently. please use afl-cmin.bash instead.
   exit 1
 }
+
 export AFL_QUIET=1
 export ASAN_OPTIONS=detect_leaks=0
-THISPATH=`dirname ${0}`
 export PATH="${THISPATH}:$PATH"
 awk -f - -- ${@+"$@"} <<'EOF'
 #!/usr/bin/awk -f
@@ -100,6 +102,8 @@ function getopt(argc, argv, options,    thisopt, i)
 
 function usage() {
    print \
+"afl-cmin\n" \
+"\n" \
 "afl-cmin [ options ] -- /path/to/target_app [ ... ]\n" \
 "\n" \
 "Required parameters:\n" \
@@ -331,7 +335,7 @@ BEGIN {
   }
 
   if (0 == system ( "grep -aq AFL_DUMP_MAP_SIZE " target_bin )) {
-    echo "[!] Trying to obtain the map size of the target ..."
+    print "[!] Trying to obtain the map size of the target ..."
     get_map_size = "AFL_DUMP_MAP_SIZE=1 " target_bin
     get_map_size | getline mapsize
     close(get_map_size)
@@ -432,7 +436,7 @@ BEGIN {
   } else {
     stat_format = "-f '%z %N'" # *BSD, MacOS
   }
-  cmdline = "(cd "in_dir" && find . \\( ! -name \".*\" -a -type d \\) -o -type f -exec stat "stat_format" \\{\\} + | sort -k1n -k2r) | grep -Ev '^0'"
+  cmdline = "(cd "in_dir" && find . \\( ! -name \".*\" -a -type d \\) -o \\( -type f -a ! -name \"cmdline\" -a ! -name \"fastresume.bin\" -a ! -name \"fuzz_bitmap\" -a ! -name \"fuzzer_setup\" -a ! -name \"fuzzer_stats\" -a ! -name \"plot_data\" -a ! -name \"target_hash\" \\) -exec stat "stat_format" \\{\\} + | sort -k1n -k2r) | grep -Ev '^0'"
   #cmdline = "ls "in_dir" | (cd "in_dir" && xargs stat "stat_format" 2>/dev/null) | sort -k1n -k2r"
   #cmdline = "(cd "in_dir" && stat "stat_format" *) | sort -k1n -k2r"
   #cmdline = "(cd "in_dir" && ls | xargs stat "stat_format" ) | sort -k1n -k2r"

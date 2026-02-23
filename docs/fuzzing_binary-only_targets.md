@@ -16,7 +16,8 @@ FRIDA mode and QEMU mode in persistent mode are the fastest - if persistent mode
 is possible and the stability is high enough.
 
 Otherwise, try Zafl, RetroWrite, Dyninst, and if these fail, too, then try
-standard FRIDA/QEMU mode with `AFL_ENTRYPOINT` to where you need it.
+standard FRIDA/QEMU mode with `AFL_ENTRYPOINT` + `AFL_EXITPOINT` to where you
+need it.
 
 If your target is non-linux, then use unicorn_mode.
 
@@ -146,7 +147,7 @@ To build unicorn_mode:
 
 ```shell
 cd unicorn_mode
-./build_unicorn_support.sh
+./build_unicorn_support.py
 ```
 
 For further information, check out
@@ -172,7 +173,7 @@ tracer implementation available in `coresight_mode/` which is faster than QEMU,
 however, cannot run in parallel. Currently, only one process can be traced, it
 is WIP.
 
-Fore more information, see
+For more information, see
 [coresight_mode/README.md](../coresight_mode/README.md).
 
 ## Binary rewriters

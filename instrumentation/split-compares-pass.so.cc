@@ -19,7 +19,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
 #include <list>
 #include <string>
 #include <fstream>
@@ -29,31 +28,19 @@
 
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
-
-#if LLVM_MAJOR >= 11
-  #include "llvm/Passes/PassPlugin.h"
-  #include "llvm/Passes/PassBuilder.h"
-  #include "llvm/IR/PassManager.h"
+#if LLVM_MAJOR >= 22
+  #include "llvm/Plugins/PassPlugin.h"
 #else
-  #include "llvm/IR/LegacyPassManager.h"
-  #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+  #include "llvm/Passes/PassPlugin.h"
 #endif
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/IR/Module.h"
-#if LLVM_VERSION_MAJOR >= 14                /* how about stable interfaces? */
-  #include "llvm/Passes/OptimizationLevel.h"
-#endif
-
+#include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/IR/IRBuilder.h"
-#if LLVM_VERSION_MAJOR >= 4 || \
-    (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR > 4)
-  #include "llvm/IR/Verifier.h"
-  #include "llvm/IR/DebugInfo.h"
-#else
-  #include "llvm/Analysis/Verifier.h"
-  #include "llvm/DebugInfo.h"
-  #define nullptr 0
-#endif
+#include "llvm/IR/Verifier.h"
+#include "llvm/IR/DebugInfo.h"
 
 using namespace llvm;
 #include "afl-llvm-common.h"
@@ -64,31 +51,17 @@ using namespace llvm;
 
 namespace {
 
-#if LLVM_MAJOR >= 11
 class SplitComparesTransform : public PassInfoMixin<SplitComparesTransform> {
 
  public:
   //  static char ID;
   SplitComparesTransform() : enableFPSplit(0) {
 
-#else
-class SplitComparesTransform : public ModulePass {
-
- public:
-  static char ID;
-  SplitComparesTransform() : ModulePass(ID), enableFPSplit(0) {
-
-#endif
-
     initInstrumentList();
 
   }
 
-#if LLVM_MAJOR >= 11
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
-#else
-  bool runOnModule(Module &M) override;
-#endif
 
  private:
   int enableFPSplit;
@@ -177,7 +150,6 @@ class SplitComparesTransform : public ModulePass {
 
 }  // namespace
 
-#if LLVM_MAJOR >= 11
 extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
 llvmGetPassPluginInfo() {
 
@@ -185,54 +157,25 @@ llvmGetPassPluginInfo() {
           /* lambda to insert our pass into the pass pipeline. */
           [](PassBuilder &PB) {
 
-  #if 1
-    #if LLVM_VERSION_MAJOR <= 13
-            using OptimizationLevel = typename PassBuilder::OptimizationLevel;
-    #endif
-    #if LLVM_VERSION_MAJOR >= 16
-      #if LLVM_VERSION_MAJOR >= 20
-            PB.registerPipelineStartEPCallback(
-      #else
+#if LLVM_VERSION_MAJOR >= 16
             PB.registerOptimizerEarlyEPCallback(
-      #endif
-    #else
+#else
             PB.registerOptimizerLastEPCallback(
-    #endif
-                [](ModulePassManager &MPM, OptimizationLevel OL) {
+#endif
+                [](ModulePassManager &MPM, OptimizationLevel OL
+#if LLVM_VERSION_MAJOR >= 20
+                   ,
+                   ThinOrFullLTOPhase Phase
+#endif
+                ) {
 
                   MPM.addPass(SplitComparesTransform());
 
                 });
 
-  /* TODO LTO registration */
-  #else
-            using PipelineElement = typename PassBuilder::PipelineElement;
-            PB.registerPipelineParsingCallback([](StringRef          Name,
-                                                  ModulePassManager &MPM,
-                                                  ArrayRef<PipelineElement>) {
-
-              if (Name == "splitcompares") {
-
-                MPM.addPass(SplitComparesTransform());
-                return true;
-
-              } else {
-
-                return false;
-
-              }
-
-            });
-
-  #endif
-
           }};
 
 }
-
-#else
-char SplitComparesTransform::ID = 0;
-#endif
 
 /// This function splits FCMP instructions with xGE or xLE predicates into two
 /// FCMP instructions with predicate xGT or xLT and EQ
@@ -675,7 +618,10 @@ bool SplitComparesTransform::splitCompare(CmpInst *cmp_inst, Module &M,
   s_op1 = IRB.CreateBinOp(Instruction::LShr, op1,
                           ConstantInt::get(OldIntType, bitw / 2));
   op1_high = IRB.CreateTruncOrBitCast(s_op1, NewIntType);
-  icmp_high = cast<CmpInst>(IRB.CreateICmp(pred, op0_high, op1_high));
+  icmp_high = dyn_cast<CmpInst>(IRB.CreateICmp(pred, op0_high, op1_high));
+  release_assert(icmp_high,
+                 "CreateICmp returned a non-Instruction. "
+                 "Support for this case must be added.");
 
   PHINode *PN = nullptr;
 
@@ -696,7 +642,10 @@ bool SplitComparesTransform::splitCompare(CmpInst *cmp_inst, Module &M,
 
       op0_low = Builder.CreateTrunc(op0, NewIntType);
       op1_low = Builder.CreateTrunc(op1, NewIntType);
-      icmp_low = cast<CmpInst>(Builder.CreateICmp(pred, op0_low, op1_low));
+      icmp_low = dyn_cast<CmpInst>(Builder.CreateICmp(pred, op0_low, op1_low));
+      release_assert(icmp_low,
+                     "CreateICmp returned a non-Instruction. "
+                     "Support for this case must be added.");
 
       BranchInst::Create(end_bb, cmp_low_bb);
 
@@ -950,8 +899,6 @@ size_t SplitComparesTransform::splitFPCompares(Module &M) {
 
   LLVMContext &C = M.getContext();
 
-#if LLVM_VERSION_MAJOR >= 4 || \
-    (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR > 7)
   const DataLayout &dl = M.getDataLayout();
 
   /* define unions with floating point and (sign, exponent, mantissa)  triples
@@ -965,8 +912,6 @@ size_t SplitComparesTransform::splitFPCompares(Module &M) {
     return counts;
 
   }
-
-#endif
 
   std::vector<CmpInst *> fcomps;
 
@@ -1709,14 +1654,8 @@ size_t SplitComparesTransform::splitFPCompares(Module &M) {
 
 }
 
-#if LLVM_MAJOR >= 11
 PreservedAnalyses SplitComparesTransform::run(Module                &M,
                                               ModuleAnalysisManager &MAM) {
-
-#else
-bool SplitComparesTransform::runOnModule(Module &M) {
-
-#endif
 
   if ((isatty(2) && getenv("AFL_QUIET") == NULL) ||
       getenv("AFL_DEBUG") != NULL) {
@@ -1822,12 +1761,8 @@ bool SplitComparesTransform::runOnModule(Module &M) {
   bool ret = count == 0 ? false : true;
 
   bool brokenDebug = false;
-  if (verifyModule(M, &errs()
-#if LLVM_VERSION_MAJOR >= 4 || \
-    (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR >= 9)
-                          ,
+  if (verifyModule(M, &errs(),
                    &brokenDebug  // 9th May 2016
-#endif
                    )) {
 
     reportError(
@@ -1852,7 +1787,6 @@ bool SplitComparesTransform::runOnModule(Module &M) {
 
   }
 
-#if LLVM_MAJOR >= 11
   /*  if (modified) {
 
       PA.abandon<XX_Manager>();
@@ -1863,36 +1797,6 @@ bool SplitComparesTransform::runOnModule(Module &M) {
     return PreservedAnalyses::all();
   else
     return PreservedAnalyses();
-#else
-  return ret;
-#endif
 
 }
-
-#if LLVM_MAJOR < 11                                 /* use old pass manager */
-
-static void registerSplitComparesPass(const PassManagerBuilder &,
-                                      legacy::PassManagerBase &PM) {
-
-  PM.add(new SplitComparesTransform());
-
-}
-
-static RegisterStandardPasses RegisterSplitComparesPass(
-    PassManagerBuilder::EP_OptimizerLast, registerSplitComparesPass);
-
-static RegisterStandardPasses RegisterSplitComparesTransPass0(
-    PassManagerBuilder::EP_EnabledOnOptLevel0, registerSplitComparesPass);
-
-  #if LLVM_VERSION_MAJOR >= 11
-static RegisterStandardPasses RegisterSplitComparesTransPassLTO(
-    PassManagerBuilder::EP_FullLinkTimeOptimizationLast,
-    registerSplitComparesPass);
-  #endif
-
-static RegisterPass<SplitComparesTransform> X("splitcompares",
-                                              "AFL++ split compares",
-                                              true /* Only looks at CFG */,
-                                              true /* Analysis Pass */);
-#endif
 

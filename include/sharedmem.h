@@ -28,6 +28,8 @@
 #ifndef __AFL_SHAREDMEM_H
 #define __AFL_SHAREDMEM_H
 
+#include <unistd.h>
+
 #include "types.h"
 
 typedef struct sharedmem {
@@ -57,7 +59,8 @@ typedef struct sharedmem {
 
 } sharedmem_t;
 
-u8  *afl_shm_init(sharedmem_t *, size_t, unsigned char non_instrumented_mode);
+u8  *afl_shm_init(sharedmem_t *, size_t, unsigned char non_instrumented_mode,
+                  mode_t mode, int gid);
 void afl_shm_deinit(sharedmem_t *);
 
 #endif

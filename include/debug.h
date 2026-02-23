@@ -24,6 +24,7 @@
 #define _HAVE_DEBUG_H
 
 #include <errno.h>
+#include <sys/stat.h>
 
 #include "types.h"
 #include "config.h"
@@ -32,9 +33,9 @@
  * Terminal colors *
  *******************/
 
-#ifndef MESSAGES_TO_STDOUT
-  #define MESSAGES_TO_STDOUT
-#endif
+/* Define MESSAGES_TO_STDOUT to send diagnostic messages to stdout.
+   By default, messages go to stderr (correct Unix convention).
+   afl-fuzz defines this in afl-fuzz.h for its TUI. */
 
 #ifdef USE_COLOR
 
@@ -331,6 +332,7 @@ static inline const char *colorfilter(const char *x) {
          "\n[-] PROGRAM ABORT : " cRST x);                               \
     SAYF(cLRD "\n    Stop location : " cRST "%s(), %s:%u\n\n", __func__, \
          __FILE__, (u32)__LINE__);                                       \
+    fflush(stdout);                                                      \
     abort();                                                             \
                                                                          \
   } while (0)
@@ -413,13 +415,59 @@ static inline const char *colorfilter(const char *x) {
                                                                               \
   } while (0)
 
-#define ck_read(fd, buf, len, fn)                              \
-  do {                                                         \
-                                                               \
-    s32 _len = (s32)(len);                                     \
-    s32 _res = read(fd, buf, _len);                            \
-    if (_res != _len) RPFATAL(_res, "Short read from %s", fn); \
-                                                               \
+#define ck_read(fd, buf, len, fn)                                              \
+  do {                                                                         \
+                                                                               \
+    s32 _len = (s32)(len);                                                     \
+    /* PERFORMANCE: Disable debug checks as requested by reviewer */           \
+    _Pragma("GCC diagnostic push")                                             \
+        _Pragma("GCC diagnostic ignored \"-Wunused-variable\"") if (0) {       \
+                                                                               \
+      fprintf(stderr, "[DEBUG ck_read] %s: expecting %d bytes, fd=%d\n", fn,   \
+              _len, fd);                                                       \
+                                                                               \
+    }                                                                          \
+    /* DEBUG: Add file size check for IJON debugging */                        \
+    if (0) {                                                                   \
+                                                                               \
+      struct stat _st;                                                         \
+      if (fstat(fd, &_st) == 0) {                                              \
+                                                                               \
+        fprintf(stderr, "[DEBUG ck_read] %s: actual file size is %ld bytes\n", \
+                fn, (long)_st.st_size);                                        \
+        if (_st.st_size != _len) {                                             \
+                                                                               \
+          fprintf(stderr,                                                      \
+                  "[DEBUG ck_read] %s: FILE SIZE MISMATCH! Queue says %d "     \
+                  "bytes, file has %ld bytes\n",                               \
+                  fn, _len, (long)_st.st_size);                                \
+                                                                               \
+        }                                                                      \
+                                                                               \
+      }                                                                        \
+                                                                               \
+    }                                                                          \
+    _Pragma("GCC diagnostic pop") s32 _res = read(fd, buf, _len);              \
+    if (0) {                                                                   \
+                                                                               \
+      fprintf(stderr, "[DEBUG ck_read] %s: got %d bytes (expected %d)\n", fn,  \
+              _res, _len);                                                     \
+                                                                               \
+    }                                                                          \
+    if (unlikely(_res != _len)) {                                              \
+                                                                               \
+      if (0) {                                                                 \
+                                                                               \
+        fprintf(stderr,                                                        \
+                "[DEBUG ck_read] %s: SHORT READ! Expected %d, got %d (diff: "  \
+                "%d)\n",                                                       \
+                fn, _len, _res, _len - _res);                                  \
+                                                                               \
+      }                                                                        \
+      RPFATAL(_res, "Short read from %s", fn);                                 \
+                                                                               \
+    }                                                                          \
+                                                                               \
   } while (0)
 
 #endif                                                   /* ! _HAVE_DEBUG_H */

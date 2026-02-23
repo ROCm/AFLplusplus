@@ -35,6 +35,7 @@
 #include "common.h"
 #include "list.h"
 #include "forkserver.h"
+#include "sharedmem.h"
 #include "hash.h"
 
 #include <stdio.h>
@@ -46,11 +47,12 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
-#include <sys/select.h>
 #include <sys/stat.h>
+#include <grp.h>
 
 #ifdef __linux__
   #include <dlfcn.h>
@@ -140,7 +142,7 @@ nyx_plugin_handler_t *afl_load_libnyx_plugin(u8 *libnyx_binary) {
   if (plugin->nyx_get_target_hash64 == NULL) { goto fail; }
 
   plugin->nyx_config_free = dlsym(handle, "nyx_config_free");
-  if (plugin->nyx_get_target_hash64 == NULL) { goto fail; }
+  if (plugin->nyx_config_free == NULL) { goto fail; }
 
   OKF("libnyx plugin is ready!");
   return plugin;
@@ -208,9 +210,53 @@ static void fsrv_exec_child(afl_forkserver_t *fsrv, char **argv) {
 
   }
 
+  if (fsrv->gid_set) {
+
+    if (setregid(fsrv->gid, fsrv->gid) == -1) {
+
+      FATAL("setgid failed: %s\n", strerror(errno));
+
+    }
+
+    if (setgroups(fsrv->nb_supl_gids, fsrv->supl_gids) == -1) {
+
+      FATAL("setgroups failed: %s\n", strerror(errno));
+
+    }
+
+  }
+
+  if (fsrv->uid_set) {
+
+    if (setreuid(fsrv->uid, fsrv->uid) == -1) {
+
+      FATAL("setuid failed: %s\n", strerror(errno));
+
+    }
+
+  }
+
+  if (fsrv->chown_needed && fsrv->out_file != NULL) {
+
+    if (access(fsrv->out_file, R_OK) == -1) {
+
+      if (errno == EACCES) {
+
+        FATAL(
+            "Access to the file to fuzz denied. Most likely the requested\n"
+            "    UID and/or GID is denied search permission ('x') for one of "
+            "the directories\n    in the path prefix of \"%s\".",
+            fsrv->out_file);
+
+      }
+
+    }
+
+  }
+
   execv(fsrv->target_path, argv);
 
-  WARNF("Execv failed in forkserver.");
+  WARNF("Execv failed in forkserver: %s.", strerror(errno));
 
 }
 
@@ -231,6 +277,10 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->nyx_tmp_workdir_path = NULL;
   fsrv->nyx_log_fd = -1;
   fsrv->nyx_target_hash64 = 0;
+
+  fsrv->gui_mode = 0;
+  fsrv->gui_python_dir = NULL;
+  fsrv->gui_python_pid = -1;
 #endif
 
   // this structure needs default so we initialize it if this was not done
@@ -239,6 +289,8 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->out_dir_fd = -1;
   fsrv->dev_null_fd = -1;
   fsrv->dev_urandom_fd = -1;
+  fsrv->fsrv_ctl_fd = -1;
+  fsrv->fsrv_st_fd = -1;
 
   /* Settings */
   fsrv->use_stdin = true;
@@ -250,19 +302,39 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->child_kill_signal = SIGKILL;
   fsrv->max_length = MAX_FILE;
 
+  fsrv->allow_cores = getenv("AFL_ALLOW_CORES") != NULL ? true : false;
+
+  if (getenv("AFL_PRELOAD_DISCRIMINATE_FORKSERVER_PARENT") != NULL) {
+
+    fsrv->setenv = 1;
+
+  } else {
+
+    fsrv->setenv = 0;
+
+  }
+
   /* exec related stuff */
   fsrv->child_pid = -1;
   fsrv->map_size = get_map_size();
+
+  /* IJON space allocation is handled by normal resize logic based on target's
+   * reported size */
   fsrv->real_map_size = fsrv->map_size;
   fsrv->use_fauxsrv = false;
   fsrv->last_run_timed_out = false;
   fsrv->debug = false;
   fsrv->uses_crash_exitcode = false;
-  fsrv->uses_asan = false;
+  fsrv->uses_asan = 0;
 
 #ifdef __AFL_CODE_COVERAGE
   fsrv->persistent_trace_bits = NULL;
 #endif
+
+  fsrv->uid_set = 0;
+  fsrv->gid_set = 0;
+
+  fsrv->perm = DEFAULT_PERMISSION;
 
   fsrv->init_child_func = fsrv_exec_child;
   list_append(&fsrv_list, fsrv);
@@ -284,6 +356,7 @@ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from) {
   fsrv_to->dev_urandom_fd = from->dev_urandom_fd;
   fsrv_to->out_fd = from->out_fd;  // not sure this is a good idea
   fsrv_to->no_unlink = from->no_unlink;
+  fsrv_to->allow_cores = from->allow_cores;
   fsrv_to->uses_crash_exitcode = from->uses_crash_exitcode;
   fsrv_to->crash_exitcode = from->crash_exitcode;
   fsrv_to->child_kill_signal = from->child_kill_signal;
@@ -310,31 +383,60 @@ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from) {
 
 }
 
-/* Wrapper for select() and read(), reading a 32 bit var.
+void afl_fsrv_setup_preload(afl_forkserver_t *fsrv, char *argv0) {
+
+  /* afl-qemu-trace takes care of converting AFL_PRELOAD. */
+  if (fsrv->qemu_mode) return;
+
+  u8 *afl_preload = getenv("AFL_PRELOAD");
+  u8 *preload_path = NULL;
+  u8 *frida_binary = NULL;
+  if (fsrv->frida_mode)
+    frida_binary = find_afl_binary(argv0, "afl-frida-trace.so");
+
+  if (afl_preload && frida_binary)
+    preload_path = alloc_printf("%s:%s", afl_preload, frida_binary);
+  else if (afl_preload)
+    preload_path = ck_strdup(afl_preload);
+  else if (frida_binary)
+    preload_path = ck_strdup(frida_binary);
+
+  ck_free(frida_binary);
+
+  if (preload_path) {
+
+    setenv("LD_PRELOAD", preload_path, 1);
+#ifdef __APPLE__
+    setenv("DYLD_INSERT_LIBRARIES", preload_path, 1);
+#endif
+    ck_free(preload_path);
+
+  }
+
+}
+
+/* Wrapper for poll() and read(), reading a 32 bit var.
   Returns the time passed to read.
   If the wait times out, returns timeout_ms + 1;
   Returns 0 if an error occurred (fd closed, signal, ...); */
 static u32 __attribute__((hot)) read_s32_timed(s32 fd, s32 *buf, u32 timeout_ms,
                                                volatile u8 *stop_soon_p) {
 
-  fd_set readfds;
-  FD_ZERO(&readfds);
-  FD_SET(fd, &readfds);
-  struct timeval timeout;
-  int            sret;
-  ssize_t        len_read;
+  int           pret;
+  ssize_t       len_read;
+  struct pollfd fds[1];
+  int           nfds = 1;
 
-  timeout.tv_sec = (timeout_ms / 1000);
-  timeout.tv_usec = (timeout_ms % 1000) * 1000;
-#if !defined(__linux__)
   u32 read_start = get_cur_time_us();
-#endif
+
+  memset(&fds, 0, sizeof(fds));
+  fds[0].fd = fd;
+  fds[0].events = POLLIN;
 
   /* set exceptfds as well to return when a child exited/closed the pipe. */
-restart_select:
-  sret = select(fd + 1, &readfds, NULL, NULL, &timeout);
-
-  if (likely(sret > 0)) {
+restart_poll:
+  pret = poll(fds, nfds, timeout_ms);
+  if (likely(pret > 0)) {
 
   restart_read:
     if (*stop_soon_p) {
@@ -348,13 +450,7 @@ restart_select:
 
     if (likely(len_read == 4)) {  // for speed we put this first
 
-#if defined(__linux__)
-      u32 exec_ms = MIN(
-          timeout_ms,
-          ((u64)timeout_ms - (timeout.tv_sec * 1000 + timeout.tv_usec / 1000)));
-#else
       u32 exec_ms = MIN(timeout_ms, (get_cur_time_us() - read_start) / 1000);
-#endif
 
       // ensure to report 1 ms has passed (0 is an error)
       return exec_ms > 0 ? exec_ms : 1;
@@ -369,14 +465,14 @@ restart_select:
 
     }
 
-  } else if (unlikely(!sret)) {
+  } else if (unlikely(!pret)) {
 
     *buf = -1;
     return timeout_ms + 1;
 
-  } else if (unlikely(sret < 0)) {
+  } else if (unlikely(pret < 0)) {
 
-    if (likely(errno == EINTR)) goto restart_select;
+    if (likely(errno == EINTR)) goto restart_poll;
 
     *buf = -1;
     return 0;
@@ -427,9 +523,9 @@ static void afl_fauxsrv_execv(afl_forkserver_t *fsrv, char **argv) {
 
     if (!child_pid) {  // New child
 
-      close(fsrv->out_dir_fd);
-      close(fsrv->dev_null_fd);
-      close(fsrv->dev_urandom_fd);
+      if (fsrv->out_dir_fd >= 0) close(fsrv->out_dir_fd);
+      if (fsrv->dev_null_fd >= 0) close(fsrv->dev_null_fd);
+      if (fsrv->dev_urandom_fd >= 0) close(fsrv->dev_urandom_fd);
 
       if (fsrv->plot_file != NULL) {
 
@@ -450,6 +546,26 @@ static void afl_fauxsrv_execv(afl_forkserver_t *fsrv, char **argv) {
       // child
       close(FORKSRV_FD);
       close(FORKSRV_FD + 1);
+
+      if (fsrv->gid_set) {
+
+        if (setgid(fsrv->gid) == -1) {
+
+          FATAL("setgid failed: %s\n", strerror(errno));
+
+        }
+
+      }
+
+      if (fsrv->uid_set) {
+
+        if (setuid(fsrv->uid) == -1) {
+
+          FATAL("setuid failed: %s\n", strerror(errno));
+
+        }
+
+      }
 
       // finally: exec...
       execv(fsrv->target_path, argv);
@@ -715,6 +831,7 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     }
 
     fsrv->nyx_runner = fsrv->nyx_handlers->nyx_new(nyx_config, fsrv->nyx_id);
+    fsrv->nyx_handlers->nyx_config_free(nyx_config);
 
     ck_free(workdir_path);
     ck_free(outdir_path_absolute);
@@ -856,14 +973,21 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
     /* TODO: Come up with some nice way to initialize this all */
 
-    if (fsrv->init_child_func != fsrv_exec_child) {
+    if (fsrv->init_child_func == afl_fauxsrv_execv) {
+
+      if (!be_quiet) { ACTF("Faux forkserver already initialized"); }
+
+    } else if (fsrv->init_child_func != fsrv_exec_child) {
 
       FATAL("Different forkserver not compatible with fauxserver");
+
+    } else {
+
+      fsrv->init_child_func = afl_fauxsrv_execv;
 
     }
 
     if (!be_quiet) { ACTF("Using AFL++ faux forkserver..."); }
-    fsrv->init_child_func = afl_fauxsrv_execv;
 
   }
 
@@ -877,6 +1001,8 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
   if (!fsrv->fsrv_pid) {
 
     /* CHILD PROCESS */
+
+    if (unlikely(fsrv->setenv)) { setenv("AFL_FORKSERVER_PARENT", "1", 0); }
 
     // enable terminating on sigpipe in the children
     struct sigaction sa;
@@ -920,9 +1046,16 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     /* Dumping cores is slow and can lead to anomalies if SIGKILL is delivered
        before the dump is complete. */
 
-    if (!fsrv->debug) {
+    if (!fsrv->debug && !fsrv->allow_cores) {
 
       r.rlim_max = r.rlim_cur = 0;
+      setrlimit(RLIMIT_CORE, &r);                          /* Ignore errors */
+
+    }
+
+    if (fsrv->allow_cores) {
+
+      r.rlim_max = r.rlim_cur = INT_MAX;
       setrlimit(RLIMIT_CORE, &r);                          /* Ignore errors */
 
     }
@@ -946,7 +1079,7 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     } else {
 
       dup2(fsrv->out_fd, 0);
-      close(fsrv->out_fd);
+      if (fsrv->out_fd >= 0) close(fsrv->out_fd);
 
     }
 
@@ -960,9 +1093,9 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     close(st_pipe[0]);
     close(st_pipe[1]);
 
-    close(fsrv->out_dir_fd);
-    close(fsrv->dev_null_fd);
-    close(fsrv->dev_urandom_fd);
+    if (fsrv->out_dir_fd >= 0) close(fsrv->out_dir_fd);
+    if (fsrv->dev_null_fd >= 0) close(fsrv->dev_null_fd);
+    if (fsrv->dev_urandom_fd >= 0) close(fsrv->dev_urandom_fd);
 
     if (fsrv->plot_file != NULL) {
 
@@ -1163,6 +1296,13 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       }
 
+      if (status & FS_OPT_IJON) {
+
+        fsrv->use_ijon = 1;
+        if (!be_quiet) { ACTF("Using IJON feature."); }
+
+      }
+
       if (status & FS_NEW_OPT_AUTODICT) {
 
         // even if we do not need the dictionary we have to read it
@@ -1235,7 +1375,10 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
       u32 status2;
       rlen = read(fsrv->fsrv_st_fd, &status2, 4);
 
-      if (status2 != keep) {
+      // Mask out expected capability flags when comparing handshake status
+      u32 expected_flags = 0;
+      if (fsrv->use_ijon) { expected_flags |= FS_OPT_IJON; }
+      if ((status2 & ~expected_flags) != keep) {
 
         FATAL("Error in forkserver communication (%08x=>%08x)", keep, status2);
 
@@ -1243,7 +1386,7 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
     } else {
 
-      if (!fsrv->qemu_mode && !fsrv->cs_mode
+      if (!fsrv->qemu_mode && !fsrv->cs_mode && !fsrv->use_fauxsrv
 #ifdef __linux__
           && !fsrv->nyx_mode
 #endif
@@ -1469,9 +1612,18 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       } else {
 
-        // The binary is most likely instrumented using AFL's tool, and we will
-        // set map_size to MAP_SIZE.
-        fsrv->real_map_size = fsrv->map_size = MAP_SIZE;
+        // if AFL_MAP_SIZE is set, use this map size
+        if (getenv("AFL_MAP_SIZE") || getenv("AFL_MAPSIZE")) {
+
+          fsrv->real_map_size = fsrv->map_size = get_map_size();
+
+        } else {
+
+          // Otherwise the binary is most likely instrumented using AFL's tool,
+          // and we will set map_size to MAP_SIZE.
+          fsrv->real_map_size = fsrv->map_size = MAP_SIZE;
+
+        }
 
       }
 
@@ -1701,13 +1853,38 @@ void afl_fsrv_kill(afl_forkserver_t *fsrv) {
 
   }
 
-  close(fsrv->fsrv_ctl_fd);
-  close(fsrv->fsrv_st_fd);
+  if (fsrv->fsrv_ctl_fd >= 0) {
+
+    close(fsrv->fsrv_ctl_fd);
+    fsrv->fsrv_ctl_fd = -1;
+
+  }
+
+  if (fsrv->fsrv_st_fd >= 0) {
+
+    close(fsrv->fsrv_st_fd);
+    fsrv->fsrv_st_fd = -1;
+
+  }
+
   fsrv->fsrv_pid = -1;
   fsrv->child_pid = -1;
 
 #ifdef __linux__
   afl_nyx_runner_kill(fsrv);
+
+  if (fsrv->gui_mode) {
+
+    if (fsrv->gui_python_pid > 0) {
+
+      kill(fsrv->gui_python_pid, fsrv->child_kill_signal);
+
+    }
+
+    fsrv->gui_python_pid = -1;
+
+  }
+
 #endif
 
 }
@@ -1719,6 +1896,86 @@ u32 afl_fsrv_get_mapsize(afl_forkserver_t *fsrv, char **argv,
 
   afl_fsrv_start(fsrv, argv, stop_soon_p, debug_child_output);
   return fsrv->map_size;
+
+}
+
+/* Get mapsize from fsrv and resize if larger than DEFAULT_SHMEM_SIZE */
+
+void afl_fsrv_resize_mapsize(afl_forkserver_t *fsrv, void *shm_p,
+                             char **use_argv, u32 map_size,
+                             volatile u8 *stop_soon, bool unicorn_mode) {
+
+  if (!fsrv->cs_mode && !fsrv->qemu_mode && !unicorn_mode) {
+
+    if (map_size <= DEFAULT_SHMEM_SIZE) {
+
+      fsrv->map_size = DEFAULT_SHMEM_SIZE;  // dummy temporary value
+
+    } else {
+
+      validate_map_size(map_size);
+      fsrv->map_size = map_size;
+
+    }
+
+    char vbuf[16];
+    snprintf(vbuf, sizeof(vbuf), "%u", fsrv->map_size);
+    setenv("AFL_MAP_SIZE", vbuf, 1);
+
+    u32 new_map_size =
+        afl_fsrv_get_mapsize(fsrv, use_argv, stop_soon,
+                             (get_afl_env("AFL_DEBUG_CHILD") ||
+                              get_afl_env("AFL_DEBUG_CHILD_OUTPUT"))
+                                 ? 1
+                                 : 0);
+
+    if (new_map_size) {
+
+      // only reinitialize when it makes sense
+      if (map_size < new_map_size) {
+
+        if (!be_quiet)
+          ACTF("Acquired new map size for target: %u bytes\n", new_map_size);
+
+#ifdef __linux__
+        /* no need to terminate the nyx runner */
+        if (!fsrv->nyx_mode) {
+
+#endif
+          sharedmem_t *shm = (sharedmem_t *)shm_p;
+          afl_shm_deinit(shm);
+          afl_fsrv_kill(fsrv);
+          fsrv->map_size = new_map_size;
+          fsrv->trace_bits =
+              afl_shm_init(shm, new_map_size, 0, DEFAULT_PERMISSION, -1);
+          afl_fsrv_start(fsrv, use_argv, stop_soon,
+                         (get_afl_env("AFL_DEBUG_CHILD") ||
+                          get_afl_env("AFL_DEBUG_CHILD_OUTPUT"))
+                             ? 1
+                             : 0);
+#ifdef __linux__
+
+        }
+
+#endif
+
+      }
+
+      map_size = new_map_size;
+
+    }
+
+    fsrv->map_size = map_size;
+
+  } else {
+
+    afl_fsrv_start(fsrv, use_argv, stop_soon,
+                   (get_afl_env("AFL_DEBUG_CHILD") ||
+                    get_afl_env("AFL_DEBUG_CHILD_OUTPUT"))
+                       ? 1
+                       : 0);
+
+  }
 
 }
 
@@ -1795,14 +2052,18 @@ void __attribute__((hot)) afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv,
 
       if (unlikely(fsrv->no_unlink)) {
 
-        fd = open(fsrv->out_file, O_WRONLY | O_CREAT | O_TRUNC,
-                  DEFAULT_PERMISSION);
+        fd = open(fsrv->out_file, O_WRONLY | O_CREAT | O_TRUNC, fsrv->perm);
 
       } else {
 
         unlink(fsrv->out_file);                           /* Ignore errors. */
-        fd = open(fsrv->out_file, O_WRONLY | O_CREAT | O_EXCL,
-                  DEFAULT_PERMISSION);
+        fd = open(fsrv->out_file, O_WRONLY | O_CREAT | O_EXCL, fsrv->perm);
+
+      }
+
+      if (fsrv->chown_needed) {
+
+        if (fchown(fd, -1, fsrv->gid) == -1) { PFATAL("fchown() failed"); }
 
       }
 
@@ -1931,6 +2192,7 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     }
 
 #else
+    /* Clear shared memory for clean execution */
     memset(fsrv->trace_bits, 0, fsrv->map_size);
     MEM_BARRIER();
 #endif
@@ -1955,6 +2217,33 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     RPFATAL(res, "Unable to request new process from fork server (OOM?)");
 
   }
+
+  // GUI Mode
+#ifdef __linux__
+  if (unlikely(fsrv->gui_mode)) {
+
+    pid_t python_pid;
+    python_pid = fork();
+
+    if (python_pid < 0) { PFATAL("GUI mode fork failed."); }
+    fsrv->gui_python_pid = python_pid;
+    if (python_pid == 0) {  // child that will perform GUI interactions
+      ACTF("Non-forkserver exec'ing, with PID = %ld\n", (long)getpid());
+      char gui_pid_str[16];
+      sprintf(gui_pid_str, "%d",
+              (int)fsrv->child_pid);  // Convert pid_t to a string
+
+      execl(fsrv->gui_python_dir, fsrv->gui_python_dir, fsrv->out_file,
+            gui_pid_str, NULL);
+
+      PFATAL("execl failed for %s", fsrv->gui_python_dir);
+      exit(1);
+
+    }
+
+  }
+
+#endif
 
 #ifdef AFL_PERSISTENT_RECORD
   // end of persistent loop?
@@ -2087,17 +2376,26 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
 
   /* Did we crash?
   In a normal case, (abort) WIFSIGNALED(child_status) will be set.
-  MSAN in uses_asan mode uses a special exit code as it doesn't support
+  MSAN & LSAN in uses_asan mode use special exit codes as they doesn't support
   abort_on_error. On top, a user may specify a custom AFL_CRASH_EXITCODE.
-  Handle all three cases here. */
+  Handle all four cases here. */
 
   if (unlikely(
           /* A normal crash/abort */
-          (WIFSIGNALED(fsrv->child_status)) ||
-          /* special handling for msan and lsan */
-          (fsrv->uses_asan &&
-           (WEXITSTATUS(fsrv->child_status) == MSAN_ERROR ||
-            WEXITSTATUS(fsrv->child_status) == LSAN_ERROR)) ||
+          (WIFSIGNALED(fsrv->child_status)
+  /* Explicitly ignore SIGINT/SIGTERM as a crash, since we use them to terminate
+   * the GUI's*/
+#ifdef __linux__
+           && (!fsrv->gui_mode || (WTERMSIG(fsrv->child_status) != SIGINT &&
+                                   WTERMSIG(fsrv->child_status) != SIGTERM))
+#endif
+               ) ||
+          /* special handling for msan */
+          ((fsrv->uses_asan & 4) &&
+           WEXITSTATUS(fsrv->child_status) == MSAN_ERROR) ||
+          /* special handling for lsan */
+          ((fsrv->uses_asan & 2) &&
+           WEXITSTATUS(fsrv->child_status) == LSAN_ERROR) ||
           /* the custom crash_exitcode was returned by the target */
           (fsrv->uses_crash_exitcode &&
            WEXITSTATUS(fsrv->child_status) == fsrv->crash_exitcode))) {
@@ -2105,6 +2403,10 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
     /* For a proper crash, set last_kill_signal to WTERMSIG, else set it to 0 */
     fsrv->last_kill_signal =
         WIFSIGNALED(fsrv->child_status) ? WTERMSIG(fsrv->child_status) : 0;
+
+    /* For a special exit code, set last_exit_code to non-zero */
+    fsrv->last_exit_code =
+        WIFSIGNALED(fsrv->child_status) ? 0 : WEXITSTATUS(fsrv->child_status);
 
 #ifdef AFL_PERSISTENT_RECORD
     if (unlikely(fsrv->persistent_record)) {

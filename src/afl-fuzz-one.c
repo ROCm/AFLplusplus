@@ -24,6 +24,7 @@
  */
 
 #include "afl-fuzz.h"
+#include "afl-ijon-min.h"
 #include <string.h>
 #include <limits.h>
 #include "cmplog.h"
@@ -338,6 +339,28 @@ u8 fuzz_one_original(afl_state_t *afl) {
   u8  a_collect[MAX_AUTO_EXTRA];
   u32 a_len = 0;
 
+  /* IJON: If we're doing IJON, skip deterministic stages and go directly to
+   * havoc */
+  if (unlikely(afl->is_doing_ijon)) {
+
+    /* Use IJON input data that was set up in fuzz_one() */
+    len = afl->ijon_input_len;
+    in_buf = orig_in = afl->ijon_input_data;
+    out_buf = ck_alloc_nozero(len);
+    memcpy(out_buf, in_buf, len);
+
+    /* Setup variables for havoc stage */
+    temp_len = len;
+    orig_hit_cnt = afl->queued_items + afl->saved_crashes;
+    havoc_queued = afl->queued_items;
+    perf_score = 100;
+    orig_perf = perf_score;
+
+    /* Jump directly to havoc stage */
+    goto havoc_stage;
+
+  }
+
 #ifdef IGNORE_FINDS
 
   /* In IGNORE_FINDS mode, skip any entries that weren't in the
@@ -356,7 +379,12 @@ u8 fuzz_one_original(afl_state_t *afl) {
       if (el->afl_custom_queue_get &&
           !el->afl_custom_queue_get(el->data, afl->queue_cur->fname)) {
 
-        return 1;
+        /* Abandon the entry and return that we skipped it.
+           If we don't do this then when the entry is smallest_favored then
+           we get caught in an infinite loop calling afl_custom_queue_get
+           on smallest_favored */
+        ret_val = 1;
+        goto abandon_entry;
 
       }
 
@@ -405,19 +433,67 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     u_simplestring_time_diff(time_tmp, afl->prev_run_time + get_cur_time(),
                              afl->start_time);
-    ACTF(
-        "Fuzzing test case #%u (%u total, %llu crashes saved, state: %s, "
-        "mode=%s, "
-        "perf_score=%0.0f, weight=%0.0f, favorite=%u, was_fuzzed=%u, "
-        "exec_us=%llu, hits=%u, map=%u, ascii=%u, run_time=%s)...",
-        afl->current_entry, afl->queued_items, afl->saved_crashes,
-        get_fuzzing_state(afl), afl->fuzz_mode ? "exploit" : "explore",
-        afl->queue_cur->perf_score, afl->queue_cur->weight,
-        afl->queue_cur->favored, afl->queue_cur->was_fuzzed,
-        afl->queue_cur->exec_us,
-        likely(afl->n_fuzz) ? afl->n_fuzz[afl->queue_cur->n_fuzz_entry] : 0,
-        afl->queue_cur->bitmap_size, afl->queue_cur->is_ascii, time_tmp);
-    fflush(stdout);
+
+    u32 t_bytes = count_non_255_bytes(afl, afl->virgin_bits);
+
+    if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+      u8 search_time[64];
+      u_simplestring_time_diff(search_time, afl->fs_stats.total_time_ms + 1, 1);
+
+      u64 average_search_time_ms =
+          afl->fs_stats.searched > 0
+              ? afl->fs_stats.total_time_ms / afl->fs_stats.searched
+              : 0;
+
+      u64 total_runtime_ms =
+          afl->prev_run_time + get_cur_time() - afl->start_time;
+      double overhead_pct =
+          total_runtime_ms > 0
+              ? (double)afl->fs_stats.total_time_ms / total_runtime_ms * 100.0
+              : 0.0;
+
+      ACTF(
+          "Fuzzing test case #%u (%u total, %s%llu crashes saved%s, state: %s, "
+          "mode=%s, "
+          "perf_score=%0.0f, weight=%0.0f, favorite=%u, was_fuzzed=%u, "
+          "exec_us=%llu, hits=%u, map=%u, ascii=%u, run_time=%s, cvg=%.02f%%) "
+          "FS (t=%s "
+          "(%.2f%%), "
+          "st=%llu, avg=%llu ms, found=%u/%u)...",
+          afl->current_entry, afl->queued_items,
+          afl->saved_crashes != 0 ? cRED : "", afl->saved_crashes, cRST,
+          get_fuzzing_state(afl), afl->fuzz_mode ? "exploit" : "explore",
+          afl->queue_cur->perf_score, afl->queue_cur->weight,
+          afl->queue_cur->favored, afl->queue_cur->was_fuzzed,
+          afl->queue_cur->exec_us,
+          likely(afl->n_fuzz) ? afl->n_fuzz[afl->queue_cur->n_fuzz_entry] : 0,
+          afl->queue_cur->bitmap_size, afl->queue_cur->is_ascii, time_tmp,
+          ((double)t_bytes * 100) / afl->fsrv.real_map_size, search_time,
+          overhead_pct, afl->fs_stats.search_tests, average_search_time_ms,
+          afl->fs_stats.found, afl->fs_stats.searched);
+      fflush(stdout);
+
+    } else {
+
+      ACTF(
+          "Fuzzing test case #%u (%u total, %s%llu crashes saved%s, state: %s, "
+          "mode=%s, "
+          "perf_score=%0.0f, weight=%0.0f, favorite=%u, was_fuzzed=%u, "
+          "exec_us=%llu, hits=%u, map=%u, ascii=%u, run_time=%s, "
+          "cvg=%.02f%%)...",
+          afl->current_entry, afl->queued_items,
+          afl->saved_crashes != 0 ? cRED : "", afl->saved_crashes, cRST,
+          get_fuzzing_state(afl), afl->fuzz_mode ? "exploit" : "explore",
+          afl->queue_cur->perf_score, afl->queue_cur->weight,
+          afl->queue_cur->favored, afl->queue_cur->was_fuzzed,
+          afl->queue_cur->exec_us,
+          likely(afl->n_fuzz) ? afl->n_fuzz[afl->queue_cur->n_fuzz_entry] : 0,
+          afl->queue_cur->bitmap_size, afl->queue_cur->is_ascii, time_tmp,
+          ((double)t_bytes * 100) / afl->fsrv.real_map_size);
+      fflush(stdout);
+
+    }
 
   }
 
@@ -500,6 +576,33 @@ u8 fuzz_one_original(afl_state_t *afl) {
   }
 
   memcpy(out_buf, in_buf, len);
+
+  /**************
+   * FRAMESHIFT *
+   **************/
+
+  if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+    if (unlikely(afl->queue_cur->fs_status == 0)) {
+
+      /* FrameShift has not run on this input. */
+
+      /* Check frameshift overhead budget before running analysis.
+         Use total runtime since start as the reference. */
+      u64 total_runtime_ms =
+          afl->prev_run_time + get_cur_time() - afl->start_time;
+      double max_overhead = afl->afl_env.afl_frameshift_max_overhead;
+      u64    allowed_ms = (u64)((double)total_runtime_ms * max_overhead);
+
+      if (afl->fs_stats.total_time_ms <= allowed_ms) { frameshift_stage(afl); }
+
+    }
+
+    /* If we have structure information for this input, reload it to prepare for
+     * fuzzing. */
+    if (afl->queue_cur->fs_status != 0) { fs_clone_meta(afl); }
+
+  }
 
   /*********************
    * PERFORMANCE SCORE *
@@ -634,7 +737,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur >> 3;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
+    if (!bitmap_read(skip_eff_map, afl->stage_cur_byte)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -754,7 +857,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur >> 3;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
+    if (!bitmap_read(skip_eff_map, afl->stage_cur_byte)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -793,7 +896,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur >> 3;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
+    if (!bitmap_read(skip_eff_map, afl->stage_cur_byte)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -837,7 +940,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
+    if (!bitmap_read(skip_eff_map, afl->stage_cur_byte)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -858,7 +961,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   for (i = 0; i < len; i++) {
 
-    if (skip_eff_map[i]) afl->blocks_eff_select += 1;
+    if (bitmap_read(skip_eff_map, i)) afl->blocks_eff_select += 1;
 
   }
 
@@ -887,7 +990,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -930,7 +1033,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -983,7 +1086,7 @@ skip_bitflip:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1067,7 +1170,7 @@ skip_bitflip:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1197,7 +1300,7 @@ skip_bitflip:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1331,7 +1434,7 @@ skip_arith:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1391,7 +1494,7 @@ skip_arith:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1479,7 +1582,7 @@ skip_arith:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1573,7 +1676,7 @@ skip_interest:
 
     u32 last_len = 0;
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1642,7 +1745,7 @@ skip_interest:
 
   for (i = 0; i <= (u32)len; ++i) {
 
-    if (!skip_eff_map[i % len]) continue;
+    if (!bitmap_read(skip_eff_map, i % len)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1708,7 +1811,7 @@ skip_user_extras:
 
     u32 last_len = 0;
 
-    if (!skip_eff_map[i]) continue;
+    if (!bitmap_read(skip_eff_map, i)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1768,7 +1871,7 @@ skip_user_extras:
 
   for (i = 0; i <= (u32)len; ++i) {
 
-    if (!skip_eff_map[i % len]) continue;
+    if (!bitmap_read(skip_eff_map, i % len)) continue;
 
     if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
@@ -1913,14 +2016,15 @@ custom_mutator_stage:
               el->afl_custom_fuzz(el->data, out_buf, len, &mutated_buf, new_buf,
                                   target_len, max_seed_size);
 
-          if (unlikely(!mutated_buf)) {
-
-            // FATAL("Error in custom_fuzz. Size returned: %zu", mutated_size);
-            break;
-
-          }
-
           if (mutated_size > 0) {
+
+            if (unlikely(!mutated_buf)) {
+
+              // FATAL("Error in custom_fuzz. Size returned: %zu",
+              // mutated_size);
+              break;
+
+            }
 
             if (common_fuzz_stuff(afl, mutated_buf, (u32)mutated_size)) {
 
@@ -2023,6 +2127,14 @@ havoc_stage:
     afl->stage_name = afl->stage_name_buf;
     afl->stage_short = "splice";
     afl->stage_max = (SPLICE_HAVOC * perf_score / afl->havoc_div) >> 8;
+
+  }
+
+  /* IJON stage name override */
+  if (unlikely(afl->is_doing_ijon)) {
+
+    afl->stage_name = "ijon-max";
+    afl->stage_short = "ijon-max";
 
   }
 
@@ -2152,6 +2264,13 @@ havoc_stage:
     snprintf(afl->mutation, sizeof(afl->mutation), "%s HAVOC-%u-%u",
              afl->queue_cur->fname, afl->queue_cur->is_ascii, use_stacking);
 #endif
+
+    // Frameshift: save the current input meta
+    if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+      if (afl->queue_cur->fs_status != 0) { fs_save(afl->fs_curr_meta); }
+
+    }
 
     for (i = 0; i < use_stacking; ++i) {
 
@@ -2536,6 +2655,17 @@ havoc_stage:
             afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
             temp_len += clone_len;
 
+            // Frameshift tracking
+            if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+              if (afl->queue_cur->fs_status != 0) {
+
+                fs_track_insert(afl->fs_curr_meta, clone_to, clone_len, 1);
+
+              }
+
+            }
+
           } else if (unlikely(temp_len < 8)) {
 
             break;
@@ -2586,6 +2716,17 @@ havoc_stage:
             out_buf = new_buf;
             afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
             temp_len += clone_len;
+
+            // Frameshift tracking
+            if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+              if (afl->queue_cur->fs_status != 0) {
+
+                fs_track_insert(afl->fs_curr_meta, clone_to, clone_len, 1);
+
+              }
+
+            }
 
           } else if (unlikely(temp_len < 8)) {
 
@@ -2764,6 +2905,17 @@ havoc_stage:
 
           temp_len -= del_len;
 
+          // Frameshift tracking
+          if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+            if (afl->queue_cur->fs_status != 0) {
+
+              fs_track_delete(afl->fs_curr_meta, del_from, del_len);
+
+            }
+
+          }
+
           break;
 
         }
@@ -2821,6 +2973,17 @@ havoc_stage:
 
           temp_len -= del_len;
 
+          // Frameshift tracking
+          if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+            if (afl->queue_cur->fs_status != 0) {
+
+              fs_track_delete(afl->fs_curr_meta, del_from, del_len);
+
+            }
+
+          }
+
           break;
 
         }
@@ -2859,6 +3022,17 @@ havoc_stage:
           out_buf = new_buf;
           afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
           temp_len += clone_len;
+
+          // Frameshift tracking
+          if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+            if (afl->queue_cur->fs_status != 0) {
+
+              fs_track_insert(afl->fs_curr_meta, clone_to, clone_len, 1);
+
+            }
+
+          }
 
           break;
 
@@ -3001,6 +3175,17 @@ havoc_stage:
             afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
             temp_len += (new_len - old_len);
 
+            // Frameshift tracking
+            if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+              if (afl->queue_cur->fs_status != 0) {
+
+                fs_track_insert(afl->fs_curr_meta, off, new_len, 1);
+
+              }
+
+            }
+
           }
 
           // fprintf(stderr, "AFTER : %s\n", out_buf);
@@ -3094,6 +3279,17 @@ havoc_stage:
           memcpy(out_buf + insert_at, ptr, extra_len);
           temp_len += extra_len;
 
+          // Frameshift tracking
+          if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+            if (afl->queue_cur->fs_status != 0) {
+
+              fs_track_insert(afl->fs_curr_meta, insert_at, extra_len, 1);
+
+            }
+
+          }
+
           break;
 
         }
@@ -3151,6 +3347,17 @@ havoc_stage:
           /* Inserted part */
           memcpy(out_buf + insert_at, ptr, extra_len);
           temp_len += extra_len;
+
+          // Frameshift tracking
+          if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+            if (afl->queue_cur->fs_status != 0) {
+
+              fs_track_insert(afl->fs_curr_meta, insert_at, extra_len, 1);
+
+            }
+
+          }
 
           break;
 
@@ -3265,6 +3472,17 @@ havoc_stage:
           afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
           temp_len += clone_len;
 
+          // Frameshift tracking
+          if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+            if (afl->queue_cur->fs_status != 0) {
+
+              fs_track_insert(afl->fs_curr_meta, clone_to, clone_len, 1);
+
+            }
+
+          }
+
           break;
 
         }
@@ -3284,6 +3502,13 @@ havoc_stage:
     if (unlikely(!out_buf)) { PFATAL("alloc"); }
     temp_len = len;
     memcpy(out_buf, in_buf, len);
+
+    // Frameshift: restore the original input meta
+    if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+      if (afl->queue_cur->fs_status != 0) { fs_restore(afl->fs_curr_meta); }
+
+    }
 
     /* If we're finding new stuff, let's run for a bit longer, limits
        permitting. */
@@ -3344,6 +3569,14 @@ retry_splicing:
     u8                 *new_buf;
     s32                 f_diff, l_diff;
 
+    // Frameshift: reload the original input meta
+    if (likely(!afl->afl_env.afl_frameshift_disabled) &&
+        afl->queue_cur->fs_status != 0) {
+
+      fs_clone_meta(afl);
+
+    }
+
     /* First of all, if we've modified in_buf for havoc, let's clean that
        up... */
 
@@ -3386,13 +3619,26 @@ retry_splicing:
     len = target->len;
     afl->in_scratch_buf = afl_realloc(AFL_BUF_PARAM(in_scratch), len);
     memcpy(afl->in_scratch_buf, in_buf, split_at);
-    memcpy(afl->in_scratch_buf + split_at, new_buf, len - split_at);
+    memcpy(afl->in_scratch_buf + split_at, new_buf + split_at, len - split_at);
     in_buf = afl->in_scratch_buf;
     afl_swap_bufs(AFL_BUF_PARAM(in), AFL_BUF_PARAM(in_scratch));
 
     out_buf = afl_realloc(AFL_BUF_PARAM(out), len);
     if (unlikely(!out_buf)) { PFATAL("alloc"); }
     memcpy(out_buf, in_buf, len);
+
+    // Frameshift tracking
+    if (likely(!afl->afl_env.afl_frameshift_disabled)) {
+
+      if (afl->queue_cur->fs_status != 0) {
+
+        fs_track_delete(afl->fs_curr_meta, split_at,
+                        afl->queue_cur->len - split_at);
+        fs_track_insert(afl->fs_curr_meta, split_at, target->len - split_at, 1);
+
+      }
+
+    }
 
     goto custom_mutator_stage;
 
@@ -3424,13 +3670,22 @@ retry_splicing:
 /* we are through with this queue entry - for this iteration */
 abandon_entry:
 
+  /* IJON queue protection only - memory cleanup handled normally */
+  if (unlikely(afl->is_doing_ijon)) {
+
+    /* Reset IJON flag - memory cleanup handled by normal flow */
+    afl->is_doing_ijon = 0;
+
+  }
+
   afl->splicing_with = -1;
 
   /* Update afl->pending_not_fuzzed count if we made it through the calibration
      cycle and have not seen this entry before. */
 
-  if (!afl->stop_soon && !afl->queue_cur->cal_failed &&
-      !afl->queue_cur->was_fuzzed && !afl->queue_cur->disabled) {
+  if (unlikely(!afl->is_doing_ijon && !afl->stop_soon &&
+               !afl->queue_cur->cal_failed && !afl->queue_cur->was_fuzzed &&
+               !afl->queue_cur->disabled)) {
 
     --afl->pending_not_fuzzed;
     afl->queue_cur->was_fuzzed = 1;
@@ -3444,7 +3699,7 @@ abandon_entry:
 
   }
 
-  ++afl->queue_cur->fuzz_level;
+  if (unlikely(!afl->is_doing_ijon)) { ++afl->queue_cur->fuzz_level; }
   orig_in = NULL;
   return ret_val;
 
@@ -5861,7 +6116,8 @@ pacemaker_fuzzing:
         len = target->len;
         afl->in_scratch_buf = afl_realloc(AFL_BUF_PARAM(in_scratch), len);
         memcpy(afl->in_scratch_buf, in_buf, split_at);
-        memcpy(afl->in_scratch_buf + split_at, new_buf, len - split_at);
+        memcpy(afl->in_scratch_buf + split_at, new_buf + split_at,
+               len - split_at);
         in_buf = afl->in_scratch_buf;
         afl_swap_bufs(AFL_BUF_PARAM(in), AFL_BUF_PARAM(in_scratch));
 
@@ -6166,13 +6422,102 @@ u8 fuzz_one(afl_state_t *afl) {
 
   int key_val_lv_1 = -1, key_val_lv_2 = -1;
 
+  /* IJON execution path - variables for file handling */
+  u32 len = 0;
+  u8 *in_buf = NULL, *out_buf = NULL, *orig_in = NULL;
+  s32 fd = -1;
+
+  /* IJON max tracking: Check if we should use IJON input (80% chance) */
+  if (unlikely(afl->ijon_state &&
+               ijon_should_schedule((ijon_min_state *)afl->ijon_state))) {
+
+    ijon_input_info *ijon_input =
+        ijon_get_input((ijon_min_state *)afl->ijon_state);
+
+    if (likely(ijon_input && ijon_input->len > 0)) {
+
+      /* Open IJON input file directly */
+      fd = open(ijon_input->filename, O_RDONLY);
+      if (likely(fd >= 0)) {
+
+        len = ijon_input->len;
+
+        /* Map the IJON input file */
+        orig_in = in_buf =
+            mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+        if (likely(orig_in != MAP_FAILED)) {
+
+          close(fd);
+
+          /* Allocate output buffer for mutations */
+          out_buf = ck_alloc_nozero(len);
+          memcpy(out_buf, in_buf, len);
+
+          /* Store IJON input data for fuzz_one_original() */
+          if (afl->ijon_input_data) { ck_free(afl->ijon_input_data); }
+          afl->ijon_input_data = ck_alloc(len);
+          memcpy(afl->ijon_input_data, in_buf, len);
+          afl->ijon_input_len = len;
+
+          /* Set IJON execution flag */
+          afl->is_doing_ijon = 1;
+
+          /* Clean up temporary buffers */
+          ck_free(out_buf);
+          munmap(orig_in, len);
+
+          /* Call fuzz_one_original - it will handle IJON goto havoc_stage */
+          u8 result = fuzz_one_original(afl);
+
+          /* Reset IJON flag and cleanup */
+          afl->is_doing_ijon = 0;
+          if (afl->ijon_input_data) {
+
+            ck_free(afl->ijon_input_data);
+            afl->ijon_input_data = NULL;
+            afl->ijon_input_len = 0;
+
+          }
+
+          return result;
+
+        } else {
+
+          WARNF("Unable to mmap IJON input '%s'", ijon_input->filename);
+          close(fd);
+
+        }
+
+      } else {
+
+        WARNF("Unable to open IJON input '%s'", ijon_input->filename);
+
+      }
+
+    }
+
+  }
+
+  /* Clear IJON input data for normal fuzzing */
+  if (unlikely(afl->ijon_input_data)) {
+
+    ck_free(afl->ijon_input_data);
+    afl->ijon_input_data = NULL;
+    afl->ijon_input_len = 0;
+
+  }
+
+  /* Reset IJON flag for normal fuzzing */
+  afl->is_doing_ijon = 0;
+
 #ifdef _AFL_DOCUMENT_MUTATIONS
 
   u8 path_buf[PATH_MAX];
   if (afl->do_document == 0) {
 
     snprintf(path_buf, PATH_MAX, "%s/mutations", afl->out_dir);
-    afl->do_document = mkdir(path_buf, 0700);  // if it exists we do not care
+    afl->do_document =
+        mkdir(path_buf, afl->dir_perm);  // if it exists we do not care
     afl->do_document = 1;
 
   } else {

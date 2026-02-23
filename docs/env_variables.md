@@ -48,6 +48,11 @@ fairly broad use of environment variables instead:
     compilation tools, rather than the default 'clang', or 'gcc' binaries
     in your `$PATH`.
 
+  - Setting `AFL_COMPILER_LAUNCHER` lets you prepend a command to the compiler
+    invocation. This is useful for tools like `ccache` that can speed up
+    compilation by caching object files. For example, setting
+    `AFL_COMPILER_LAUNCHER=ccache` will prepend `ccache` to all compiler calls.
+
   - Most AFL tools do not print any output if stdout/stderr are redirected. If
     you want to get the output into a file, then set the `AFL_DEBUG` environment
     variable. This is sadly necessary for various build processes which fail
@@ -80,6 +85,12 @@ fairly broad use of environment variables instead:
 
     Note that this is an outdated variable. Only LLVM CLASSIC pass can use this.
 
+  - Setting `AFL_INPUT_PLACEHOLDER` to a string allows you to use that string 
+    as a placeholder instead of "@@" in the target command line arguments.
+    Use this when "@@" conflicts with the parameters of your program.
+    For eg. `AFL_INPUT_PLACEHOLDER=NEW_PLACEHOLDER afl-fuzz -i in -o out --
+    ./targetProgram NEW_PLACEHOLDER`
+
   - `AFL_NO_BUILTIN` causes the compiler to generate code suitable for use with
     libtokencap.so (but perhaps running a bit slower than without the flag).
 
@@ -107,8 +118,13 @@ fairly broad use of environment variables instead:
       conditions
     - `AFL_USE_UBSAN=1` - activates the undefined behavior sanitizer
     - `AFL_UBSAN_VERBOSE=1` - outputs detailed diagnostic information when undefined behavior is detected, instead of simply terminating with "Illegal Instruction"
+    . `AFL_USE_RTSAN` . activates the realtime sanitizer (realtime violations in deterministic run time constraints). (clang 20 minimum)
 
     - Note: both `AFL_CFISAN_VERBOSE=1` and `AFL_UBSAN_VERBOSE=1` are disabled by default as verbose output can significantly slow down fuzzing performance. Use these options only during debugging or when additional crash diagnostics are required
+
+  - `AFL_LLVM_ONLY_FSRV`/`AFL_GCC_ONLY_FSRV` will inject forkserver but not pc instrumentation. Please note this is different compared to `AFL_LLVM_DISABLE_INSTRUMENTATION`, which will totally disable forkserver implementation. This env is pretty useful in two cases:
+    - [SAND](./SAND.md). In this case, the binaries built in this way will serve as extra oracles. Check the corresponding documents for details.
+    - Compatible with LibAFL ForkserverExecutor implementation and thus faster to repeatedly run, compared to simple CommandExecutor.
 
   - `TMPDIR` is used by afl-as for temporary files; if this variable is not set,
     the tool defaults to /tmp.
@@ -259,7 +275,6 @@ combined.
   - `AFL_LLVM_MAP_ADDR` sets the fixed map address to a different address than
     the default `0x10000`. A value of 0 or empty sets the map address to be
     dynamic (the original AFL way, which is slower).
-  - `AFL_LLVM_MAP_DYNAMIC` sets the shared memory address to be dynamic.
   - `AFL_LLVM_LTO_SKIPINIT` skips adding initialization code. Some global vars
     (e.g. the highest location ID) are not injected. Needed to instrument with
     [WAFL](https://github.com/fgsect/WAFL.git).
@@ -295,6 +310,16 @@ Setting `AFL_LLVM_THREADSAFE_INST` will inject code that implements thread safe
 counters. The overhead is a little bit higher compared to the older non-thread
 safe case. Note that this disables neverzero (see NOT_ZERO).
 
+#### Deny exec* calls
+
+Setting `AFL_LLVM_DENY_EXEC=1` during compilation will cause the instrumented
+binary to abort when any `exec*` family function is called. This is useful to
+prevent coverage map corruption that can occur when a target calls `exec*`
+functions, as the exec'd process will inherit the instrumentation but may not
+be the intended fuzzing target. Only enable this if your target should never
+call exec functions during normal operation.
+
+
 ## 3) Settings for GCC / GCC_PLUGIN modes
 
 There are a few specific features that are only available in GCC and GCC_PLUGIN
@@ -321,10 +346,10 @@ mode.
     [instrumentation/README.instrument_list.md](../instrumentation/README.instrument_list.md)
     for more information.
 
-    Setting `AFL_GCC_DISABLE_VERSION_CHECK=1` will disable the GCC plugin 
+    Setting `AFL_GCC_DISABLE_VERSION_CHECK=1` will disable the GCC plugin
     version check if the target GCC plugin differs from the system-installed
-    version, resolving issues caused by version mismatches between GCC and 
-    the plugin. 
+    version, resolving issues caused by version mismatches between GCC and
+    the plugin.
 
     Setting `AFL_GCC_OUT_OF_LINE=1` will instruct afl-gcc-fast to instrument the
     code with calls to an injected subroutine instead of the much more efficient
@@ -365,6 +390,9 @@ checks or alter some of the more exotic semantics of the tool:
   - Benchmarking only: `AFL_BENCH_JUST_ONE` causes the fuzzer to exit after
     processing the first queue entry; and `AFL_BENCH_UNTIL_CRASH` causes it to
     exit soon after the first crash is found.
+
+  - Setting `AFL_ALLOW_CORES` will allow writing core files on crashes.
+    Not recommended unless you have crashes that do not reproduce stand-alone.
 
   - `AFL_CMPLOG_ONLY_NEW` will only perform the expensive cmplog feature for
     newly found test cases and not for test cases that are loaded on startup
@@ -419,7 +447,7 @@ checks or alter some of the more exotic semantics of the tool:
   - `AFL_EXIT_ON_SEED_ISSUES` will restore the vanilla afl-fuzz behavior which
     does not allow crashes or timeout seeds in the initial -i corpus.
 
-  - `AFL_CRASHING_SEEDS_AS_NEW_CRASH` will treat crashing seeds as new crash. these 
+  - `AFL_CRASHING_SEEDS_AS_NEW_CRASH` will treat crashing seeds as new crash. these
     crashes will be written to crashes folder as op:dry_run, and orig:<seed_file_name>.
 
   - `AFL_EXIT_ON_TIME` causes afl-fuzz to terminate if no new paths were found
@@ -541,6 +569,10 @@ checks or alter some of the more exotic semantics of the tool:
 
   - `AFL_NO_FASTRESUME` will not try to read or write a fast resume file.
 
+  - `AFL_FORCE_FASTRESUME` on the other hand will load the fast resume file
+    (if it exists) even if the target binary was changed. Note that the
+    coverage map size must be exactly the same for this to work.
+
   - Setting `AFL_NO_UI` inhibits the UI altogether and just periodically prints
     some basic stats. This behavior is also automatically triggered when the
     output from afl-fuzz is redirected to a file or to a pipe.
@@ -572,13 +604,9 @@ checks or alter some of the more exotic semantics of the tool:
     without disrupting the afl-fuzz process itself. This is useful, among other
     things, for bootstrapping libdislocator.so.
 
-  - In QEMU mode (-Q), setting `AFL_QEMU_CUSTOM_BIN` will cause afl-fuzz to skip
-    prepending `afl-qemu-trace` to your command line. Use this if you wish to
-    use a custom afl-qemu-trace or if you need to modify the afl-qemu-trace
-    arguments.
-
   - `AFL_SHA1_FILENAMES` causes AFL++ to generate files named by the SHA1 hash
     of their contents, rather than use the standard `id:000000,...` names.
+    Warning: this disables any syncing to any AFL instances!
 
   - `AFL_SHUFFLE_QUEUE` randomly reorders the input queue on startup. Requested
     by some users for unorthodox parallelized fuzzing setups, but not advisable
@@ -663,9 +691,65 @@ checks or alter some of the more exotic semantics of the tool:
     Note that will not be exact and with slow targets it can take seconds
     until there is a slice for the time test.
 
+  - When using `AFL_PRELOAD` with a preload that disable `fork()` calls in
+    the target, the forkserver becomes unable to fork.
+    To overcome this issue, the `AFL_PRELOAD_DISCRIMINATE_FORKSERVER_PARENT`
+    permits to be able to check in the preloaded library if the environment
+    variable `AFL_FORKSERVER_PARENT` is set, to be able to use vanilla
+    `fork()` in the forkserver, and the placeholder in the target.
+    Here is a POC :
+    ```C
+    // AFL_PRELOAD_DISCRIMINATE_FORKSERVER_PARENT=1 afl-fuzz ...
+    pid_t fork(void)
+    {
+        if (getenv("AFL_FORKSERVER_PARENT") == NULL)
+            return 0; // We are in the target
+        else
+            return real_fork(); // We are in the forkserver
+    }
+    ```
+
+  - `AFL_FORKSRV_UID` allows you to specify the UID that should be used when
+    running the fork server. When setting this variable, user should ensure
+    afl-fuzz binary has enough privileges to modify the UID (e.g. CAP\_SETUID
+    capability in Linux system).
+
+  - `AFL_FORKSRV_GID` allows you to specify the GID and the supplementary group
+    IDs that should be used when running the fork server. When setting this
+    variable, user should ensure afl-fuzz binary has enough privileges to
+    modify the GIDs (e.g. CAP\_SETGID capability in Linux system).
+
+  - When both `AFL_FORKSRV_UID` and `AFL_FORKSRV_GID` are set, afl-fuzz binary
+    and the fork server no longer share any IDs. Thus, afl-fuzz binary changes
+    the group owner of the created files to ensure that the fork server can
+    still access them. In such case, user should ensure afl-fuzz binary has
+    enough privileges to modify the ownership of entities (e.g. CAP\_CHOWN
+    capability in Linux system).
+
+  - Setting `AFL_FRAMESHIFT_DISABLE` will disable the frameshift analysis stage.
+    Frameshift automatically discovers size/offset fields in structured inputs
+    and keeps them consistent as mutations insert or delete bytes. Disabling it
+    may be useful for targets that do not consume structured binary formats, or
+    when you want to avoid the overhead of the analysis entirely.
+
+  - `AFL_FRAMESHIFT_MAX_OVERHEAD` controls the maximum fraction of total fuzzing
+    time that frameshift analysis is allowed to consume. The value is a float
+    between `0.0` and `1.0` (default `0.10`, i.e. 10%). If the cumulative time
+    spent in frameshift analysis exceeds this fraction of the overall run time,
+    new analyses are skipped until the ratio drops back under the limit.
+
+  - Normally a `README.txt` is written to the `crashes/` directory when a first
+    crash is found. Setting `AFL_NO_CRASH_README` will prevent this. Useful when
+    counting crashes based on a file count in that directory.
+
 ## 6) Settings for afl-qemu-trace
 
 The QEMU wrapper used to instrument binary-only code supports several settings:
+
+  - Setting `AFL_QEMU_CUSTOM_BIN` will cause afl-fuzz to skip prepending
+    `afl-qemu-trace` to your command line. Use this if you wish to use a
+    custom afl-qemu-trace or if you need to modify the afl-qemu-trace
+    arguments.
 
   - Setting `AFL_COMPCOV_LEVEL` enables the CompareCoverage tracing of all cmp
     and sub in x86 and x86_64 and memory comparison functions (e.g., strcmp,
@@ -690,8 +774,10 @@ The QEMU wrapper used to instrument binary-only code supports several settings:
     inside any dynamically linked libraries (notably including glibc).
 
   - You can use `AFL_QEMU_INST_RANGES=0xaaaa-0xbbbb,0xcccc-0xdddd` to just
-    instrument specific memory locations, e.g. a specific library.
-    Excluding ranges takes priority over any included ranges or `AFL_INST_LIBS`.
+    instrument specific memory locations, e.g. a specific library. You may
+    also provide the filename of the library. Excluding ranges takes priority
+    over any included ranges or `AFL_INST_LIBS`. See
+    [qemu_mode/README.md#partial-instrumenation](../qemu_mode/README.md#6-partial-instrumentation)).
 
   - You can use `AFL_QEMU_EXCLUDE_RANGES=0xaaaa-0xbbbb,0xcccc-0xdddd` to **NOT**
     instrument specific memory locations, e.g. a specific library.
@@ -700,6 +786,10 @@ The QEMU wrapper used to instrument binary-only code supports several settings:
   - It is possible to set `AFL_INST_RATIO` to skip the instrumentation on some
     of the basic blocks, which can be useful when dealing with very complex
     binaries.
+
+  - You can switch to block coverage that has less chances of colliding (but
+    on the other hand coverage is on blocks, not edges) with
+    `AFL_QEMU_BLOCK_COV`.
 
   - Setting `AFL_QEMU_COMPCOV` enables the CompareCoverage tracing of all cmp
     and sub in x86 and x86_64. This is an alias of `AFL_COMPCOV_LEVEL=1` when
@@ -727,15 +817,17 @@ The QEMU wrapper used to instrument binary-only code supports several settings:
   - With `AFL_USE_QASAN`, you can enable QEMU AddressSanitizer for dynamically
     linked binaries.
 
+  - Using AFL_QEMU_IJON=test.conf allows qemu to call the ijon function, 
+    which allows aflpp to additionally gain awareness of 
+    changes in key variables of the target program, 
+    which is an excellent supplement to coverage-only feedback.(see
+    [qemu_mode/README.md](../qemu_mode/README.md) for more details).
+
   - The underlying QEMU binary will recognize any standard "user space
     emulation" variables (e.g., `QEMU_STACK_SIZE`), but there should be no
     reason to touch them.
 
-  - Normally a `README.txt` is written to the `crashes/` directory when a first
-    crash is found. Setting `AFL_NO_CRASH_README` will prevent this. Useful when
-    counting crashes based on a file count in that directory.
-
-## 8) Settings for afl-frida-trace
+## 7) Settings for afl-frida-trace
 
 The FRIDA wrapper used to instrument binary-only code supports many of the same
 options as `afl-qemu-trace`, but also has a number of additional advanced
@@ -825,7 +917,7 @@ support.
   dump you must set a sufficient timeout (using `-t`) to avoid `afl-fuzz`
   killing the process whilst it is being dumped.
 
-## 9) Settings for afl-cmin
+## 8) Settings for afl-cmin
 
 The corpus minimization script offers very little customization:
 
@@ -843,7 +935,7 @@ The corpus minimization script offers very little customization:
   - `AFL_PRINT_FILENAMES` prints each filename to stdout, as it gets processed.
     This can help when embedding `afl-cmin` or `afl-showmap` in other scripts.
 
-## 10) Settings for afl-tmin
+## 9) Settings for afl-tmin
 
 Virtually nothing to play with. Well, in QEMU mode (`-Q`), `AFL_PATH` will be
 searched for afl-qemu-trace. In addition to this, `TMPDIR` may be used if a
@@ -854,12 +946,12 @@ to match when minimizing crashes. This will make minimization less useful, but
 may prevent the tool from "jumping" from one crashing condition to another in
 very buggy software. You probably want to combine it with the `-e` flag.
 
-## 11) Settings for afl-analyze
+## 10) Settings for afl-analyze
 
 You can set `AFL_ANALYZE_HEX` to get file offsets printed as hexadecimal instead
 of decimal.
 
-## 12) Settings for libdislocator
+## 11) Settings for libdislocator
 
 The library honors these environment variables:
 
@@ -881,12 +973,12 @@ The library honors these environment variables:
   - `AFL_LD_VERBOSE` causes the library to output some diagnostic messages that
     may be useful for pinpointing the cause of any observed issues.
 
-## 13) Settings for libtokencap
+## 12) Settings for libtokencap
 
 This library accepts `AFL_TOKEN_FILE` to indicate the location to which the
 discovered tokens should be written.
 
-## 14) Third-party variables set by afl-fuzz & other tools
+## 13) Third-party variables set by afl-fuzz & other tools
 
 Several variables are not directly interpreted by afl-fuzz, but are set to
 optimal values if not already present in the environment:
