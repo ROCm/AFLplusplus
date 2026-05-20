@@ -11,7 +11,6 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
   AFL_HARDEN=1 ../afl-clang-fast -o test-compcov.harden test-compcov.c > /dev/null 2>&1
   test -e test-instr.plain && {
     chmod +x test-instr.plain
-    ls -l test-instr.plain
     $ECHO "$GREEN[+] llvm_mode compilation succeeded"
     echo 0 | AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.plain.0 -r -- ./test-instr.plain > /dev/null 2>&1
     AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.plain.1 -r -- ./test-instr.plain < /dev/null > /dev/null 2>&1
@@ -312,6 +311,15 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
       $ECHO "$GREEN[+] cmplog routines pass instrumentation test passed"
     } || {
       $ECHO "$RED[!] cmplog routines pass instrumentation test failed"
+      CODE=1
+    }
+  }
+  # Test cmplog routine hooks on page-boundary strings
+  test -e test-cmplog-routines-bounds.sh && {
+    ./test-cmplog-routines-bounds.sh > /dev/null 2>&1 && {
+      $ECHO "$GREEN[+] cmplog routines bounds test passed"
+    } || {
+      $ECHO "$RED[!] cmplog routines bounds test failed"
       CODE=1
     }
   }

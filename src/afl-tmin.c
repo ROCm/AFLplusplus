@@ -12,7 +12,7 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -931,12 +931,13 @@ static void set_up_environment(afl_forkserver_t *fsrv, char **argv) {
 
   if (!out_file) {
 
-    u8 *use_dir = ".";
+    u8 *use_dir = get_afl_env("TMPDIR");
 
-    if (access(use_dir, R_OK | W_OK | X_OK)) {
+    if (!use_dir) {
 
-      use_dir = get_afl_env("TMPDIR");
-      if (!use_dir) { use_dir = "/tmp"; }
+      use_dir = ".";
+
+      if (access(use_dir, R_OK | W_OK | X_OK)) { use_dir = "/tmp"; }
 
     }
 

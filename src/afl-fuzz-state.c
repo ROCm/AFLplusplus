@@ -9,7 +9,7 @@
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -171,6 +171,13 @@ void afl_resize_map_buffers(afl_state_t *afl, u32 old_size, u32 new_size) {
   afl->virgin_crash = ck_realloc(afl->virgin_crash, new_size);
   afl->var_bytes = ck_realloc(afl->var_bytes, new_size);
   afl->top_rated = ck_realloc(afl->top_rated, new_size * sizeof(void *));
+  if (afl->cycle_schedules && afl->top_rated_candidates) {
+
+    afl->top_rated_candidates =
+        ck_realloc(afl->top_rated_candidates, new_size * sizeof(u32 *));
+
+  }
+
   afl->clean_trace = ck_realloc(afl->clean_trace, new_size);
   afl->clean_trace_custom = ck_realloc(afl->clean_trace_custom, new_size);
   afl->first_trace = ck_realloc(afl->first_trace, new_size);
@@ -182,6 +189,13 @@ void afl_resize_map_buffers(afl_state_t *afl, u32 old_size, u32 new_size) {
 
     memset(afl->var_bytes + old_size, 0, size_diff);
     memset(afl->top_rated + old_size, 0, size_diff * sizeof(void *));
+    if (afl->cycle_schedules && afl->top_rated_candidates) {
+
+      memset(afl->top_rated_candidates + old_size, 0,
+             size_diff * sizeof(u32 *));
+
+    }
+
     memset(afl->clean_trace + old_size, 0, size_diff);
     memset(afl->clean_trace_custom + old_size, 0, size_diff);
     memset(afl->first_trace + old_size, 0, size_diff);
@@ -600,15 +614,14 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 
                               afl_environment_variable_len)) {
 
-            afl->afl_env.afl_statsd_tags_flavor =
-                (u8 *)get_afl_env(afl_environment_variables[i]);
+            // handled elsewhere
 
           } else if (!strncmp(env, "AFL_NO_COLOUR",
 
                               afl_environment_variable_len)) {
 
-            afl->afl_env.afl_statsd_tags_flavor =
-                (u8 *)get_afl_env(afl_environment_variables[i]);
+            // handled elsewhere
+
 #endif
 
           } else if (!strncmp(env, "AFL_KILL_SIGNAL",
@@ -943,8 +956,13 @@ void afl_state_deinit(afl_state_t *afl) {
   afl_free(afl->in_buf);
   afl_free(afl->in_scratch_buf);
   afl_free(afl->ex_buf);
-  afl_free(afl->alias_table);
-  afl_free(afl->alias_probability);
+  free(afl->alias_table);
+  free(afl->alias_probability);
+  free(afl->splice_buf_ids);
+  if (afl->testcase_buf) { afl_free(afl->testcase_buf); }
+  if (afl->splicecase_buf) { afl_free(afl->splicecase_buf); }
+
+  if (afl->fsrv.use_ijon) { afl_free(afl->ijon_input_data); }
 
   ck_free(afl->virgin_bits);
   ck_free(afl->virgin_tmout);
@@ -962,12 +980,6 @@ void afl_state_deinit(afl_state_t *afl) {
     destroy_ijon_min_state((ijon_min_state *)afl->ijon_state);
     afl->ijon_state = NULL;
     afl->ijon_bits = NULL;
-    if (afl->ijon_input_data) {
-
-      ck_free(afl->ijon_input_data);
-      afl->ijon_input_data = NULL;
-
-    }
 
     if (afl->ijon_shared_access) {
 

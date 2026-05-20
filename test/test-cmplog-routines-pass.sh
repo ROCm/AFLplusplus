@@ -16,6 +16,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
+GREY="\033[1;90m"
 
 PASS=0
 FAIL=0
@@ -31,7 +32,7 @@ check_hook() {
         -S -emit-llvm -o "$TEMP_DIR/test.ll" "$source_file" 2>/dev/null
 
     if [ $? -ne 0 ]; then
-        echo -e "${RED}[FAIL]${NC} $test_name - compilation failed"
+        echo -e "${RED}[-] $test_name - compilation failed"
         ((FAIL++))
         return 1
     fi
@@ -39,13 +40,13 @@ check_hook() {
     # Check if the hook is present before the function call
     if grep -q "$expected_hook" "$TEMP_DIR/test.ll" && \
        grep -q "$function_call" "$TEMP_DIR/test.ll"; then
-        echo -e "${GREEN}[PASS]${NC} $test_name"
+        #echo -e "${GREEN}[+] $test_name"
         ((PASS++))
         return 0
     else
-        echo -e "${RED}[FAIL]${NC} $test_name - hook not found"
-        echo "  Expected hook: $expected_hook"
-        echo "  Expected call: $function_call"
+        echo -e "${RED}[-] $test_name - hook not found"
+        #echo "  Expected hook: $expected_hook"
+        #echo "  Expected call: $function_call"
         ((FAIL++))
         return 1
     fi
@@ -57,13 +58,12 @@ if [ ! -x "$AFL_DIR/afl-clang-fast" ]; then
     exit 1
 fi
 
-echo "Testing CmpLog routines pass instrumentation..."
-echo
+echo -e "$GREY[*] Testing CmpLog routines pass instrumentation..."
 
 #############################################################################
 # isMemcmp: int func(ptr, ptr, size_t) -> __cmplog_rtn_hook_n
 #############################################################################
-echo -e "${YELLOW}=== memcmp-like functions (3 params, returns int) ===${NC}"
+echo -e "$GREY[*] memcmp-like functions (3 params, returns int)"
 
 # memcmp - standard libc
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -107,12 +107,10 @@ int main() { char buf[100] = {0}; return memcmpct(buf, "needle", 6); }
 EOF
 check_hook "memcmpct" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_n" "@memcmpct"
 
-echo
-
 #############################################################################
 # isStrcmp: int func(ptr, ptr) -> __cmplog_rtn_hook_str
 #############################################################################
-echo -e "${YELLOW}=== strcmp-like functions (2 params, returns int) ===${NC}"
+echo -e "[*] strcmp-like functions (2 params, returns int)"
 
 # strcmp - standard libc
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -261,12 +259,10 @@ int main() { char buf[100] = {0}; return sqlite3StrICmp(buf, "needle"); }
 EOF
 check_hook "sqlite3StrICmp" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_str" "@sqlite3StrICmp"
 
-echo
-
 #############################################################################
 # isStrncmp: int func(ptr, ptr, size_t) -> __cmplog_rtn_hook_strn
 #############################################################################
-echo -e "${YELLOW}=== strncmp-like functions (3 params, returns int) ===${NC}"
+echo -e "${GREY}[*] strncmp-like functions (3 params, returns int)"
 
 # strncmp - standard libc
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -359,12 +355,10 @@ int main() { char buf[100] = {0}; return sqlite3_strnicmp(buf, "needle", 6); }
 EOF
 check_hook "sqlite3_strnicmp" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_strn" "@sqlite3_strnicmp"
 
-echo
-
 #############################################################################
 # isStrstr: ptr func(ptr, ptr) -> __cmplog_rtn_hook_str
 #############################################################################
-echo -e "${YELLOW}=== strstr-like functions (2 params, returns ptr) ===${NC}"
+echo -e "${GREY}[*] strstr-like functions (2 params, returns ptr)"
 
 # strstr - standard libc
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -402,12 +396,10 @@ int main() { char buf[100] = {0}; return xmlStrcasestr(buf, "needle") != 0; }
 EOF
 check_hook "xmlStrcasestr" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_str" "@xmlStrcasestr"
 
-echo
-
 #############################################################################
 # isGStrstrLen: ptr func(ptr, int, ptr) -> __cmplog_rtn_hook_str
 #############################################################################
-echo -e "${YELLOW}=== g_strstr_len (3 params: ptr, int, ptr) ===${NC}"
+echo -e "${GREY}[*] g_strstr_len (3 params: ptr, int, ptr)"
 
 # g_strstr_len - GLib
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -416,12 +408,10 @@ int main() { char buf[100] = {0}; return g_strstr_len(buf, 100, "needle") != 0; 
 EOF
 check_hook "g_strstr_len" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_str" "@g_strstr_len"
 
-echo
-
 #############################################################################
 # isMemmem: ptr func(ptr, size_t, ptr, size_t) -> __cmplog_rtn_hook_n
 #############################################################################
-echo -e "${YELLOW}=== memmem (4 params) ===${NC}"
+echo -e "${GREY}[*] memmem (4 params)"
 
 # memmem - GNU extension
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -431,12 +421,10 @@ int main() { char buf[100] = {0}; return memmem(buf, 100, "needle", 6) != 0; }
 EOF
 check_hook "memmem" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_n" "@memmem"
 
-echo
-
 #############################################################################
 # isStrnstr: ptr func(ptr, ptr, size_t) -> __cmplog_rtn_hook_strn
 #############################################################################
-echo -e "${YELLOW}=== strnstr (3 params: ptr, ptr, size_t) ===${NC}"
+echo -e "${GREY}[*] strnstr (3 params: ptr, ptr, size_t)"
 
 # strnstr - BSD
 cat > "$TEMP_DIR/test.c" << 'EOF'
@@ -445,10 +433,7 @@ int main() { char buf[100] = {0}; return strnstr(buf, "needle", 100) != 0; }
 EOF
 check_hook "strnstr" "$TEMP_DIR/test.c" "__cmplog_rtn_hook_strn" "@strnstr"
 
-echo
-echo "====================================="
-echo "Results: $PASS passed, $FAIL failed"
-echo "====================================="
+echo -e "$GREY[*] Results: $PASS passed, $FAIL failed"
 
 if [ $FAIL -gt 0 ]; then
     exit 1

@@ -10,7 +10,7 @@
                      Heiko Eissfeldt <heiko.eissfeldt@hexco.de>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -198,6 +198,43 @@ static void at_exit() {
 
 }
 
+static void configure_ijon_runtime(afl_state_t *afl) {
+
+#ifdef __linux__
+  if (afl->fsrv.nyx_mode) {
+
+    FATAL(
+        "IJON mode is not compatible with nyx mode (-X/-Y). Nyx uses full "
+        "system emulation with different memory management.");
+
+  }
+
+#endif
+
+  if (afl->fsrv.map_size <= 4 + MAP_SIZE_IJON_BYTES + MAP_SIZE_IJON_MAP) {
+
+    FATAL("target forkserver reports too small map for IJON - BUG!");
+
+  }
+
+  afl->fsrv.map_size -= MAP_SIZE_IJON_BYTES;
+  afl->fsrv.real_map_size -= MAP_SIZE_IJON_BYTES;
+
+  afl->ijon_bits = (u64 *)(afl->fsrv.trace_bits + afl->fsrv.map_size);
+
+  if (afl->ijon_shared_access) {
+
+    cleanup_dynamic_shared_access(afl->ijon_shared_access);
+
+  }
+
+  afl->ijon_shared_access = setup_dynamic_shared_access(
+      afl->fsrv.trace_bits, afl->fsrv.map_size, afl->fsrv.real_map_size);
+
+  afl_ijon_retire_max = getenv("AFL_IJON_RETIRE_MAX") != NULL;
+
+}
+
 /* Display usage hints. */
 
 static void usage(u8 *argv0, int more_help) {
@@ -306,8 +343,9 @@ static void usage(u8 *argv0, int more_help) {
       "  -z            - skip the enhanced deterministic fuzzing\n"
       "                  (note that the old -d and -D flags are ignored.)\n"
       "  -T text       - text banner to show on the screen\n"
-      "  -I command    - execute this command/script when a new crash is "
-      "found\n"
+      "  -I command    - execute this command when a new crash is found, the "
+      "crash\n"
+      "                  file path is passed as argument\n"
       //"  -B bitmap.txt - mutate a specific test case, use the
       // out/default/fuzz_bitmap file\n"
       "  -C            - crash exploration mode (the peruvian rabbit thing)\n"
@@ -363,6 +401,9 @@ static void usage(u8 *argv0, int more_help) {
       "AFL_EXPAND_HAVOC_NOW: immediately enable expand havoc mode (default: after 60\n"
       "                      minutes and a cycle without finds)\n"
       "AFL_FAST_CAL: limit the calibration stage to three cycles for speedup\n"
+      "AFL_OLD_CHILD_SYNC: use file descriptor persistent-mode synchronization\n"
+      "                    instead of the default shared memory + futex path\n"
+      "                    (Linux only)\n"
       "AFL_FORCE_UI: force showing the status screen (for virtual consoles)\n"
       "AFL_FORKSRV_INIT_TMOUT: time spent waiting for forkserver during startup (in ms)\n"
       "AFL_HANG_TMOUT: override timeout value (in milliseconds)\n"
@@ -819,7 +860,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
         if (afl->cpu_to_bind != -1) FATAL("Multiple -b options not supported");
 
-        if (sscanf(optarg, "%d", &afl->cpu_to_bind) < 0) {
+        if (sscanf(optarg, "%d", &afl->cpu_to_bind) != 1) {
 
           FATAL("Bad syntax used for -b");
 
@@ -980,6 +1021,12 @@ int main(int argc, char **argv_orig, char **envp) {
 
         }
 
+        if (strlen(optarg) > SYNC_ID_MAX_LEN) {
+
+          FATAL("maximum -S/-M name length exceeded");
+
+        }
+
         afl->sync_id = ck_strdup(optarg);
         afl->old_seed_selection = 1;  // force old queue walking seed selection
         afl->disable_trim = 1;        // disable trimming
@@ -1029,6 +1076,13 @@ int main(int argc, char **argv_orig, char **envp) {
           FATAL(
               "argument for -M started with a dash '-', which is used for "
               "options");
+
+        }
+
+        if (strlen(optarg) > SYNC_ID_MAX_LEN) {
+
+          FATAL("maximal -S/-M name is %u characters",
+                (unsigned)SYNC_ID_MAX_LEN);
 
         }
 
@@ -1815,7 +1869,8 @@ int main(int argc, char **argv_orig, char **envp) {
 
   if (afl->shm.cmplog_mode && strcmp("0", afl->cmplog_binary) == 0) {
 
-    afl->cmplog_binary = strdup(argv[optind]);
+    ck_free(afl->cmplog_binary);
+    afl->cmplog_binary = ck_strdup(argv[optind]);
 
   }
 
@@ -1877,22 +1932,6 @@ int main(int argc, char **argv_orig, char **envp) {
   if (afl->cycle_schedules) {
 
     afl->top_rated_candidates = ck_alloc(map_size * sizeof(u32 *));
-
-  }
-
-  if (afl->san_binary_length) {
-
-    if (afl->san_abstraction == UNIQUE_TRACE) {
-
-      afl->n_fuzz_dup = ck_alloc(N_FUZZ_SIZE_BITMAP * sizeof(u8));
-
-    }
-
-    if (afl->san_abstraction == SIMPLIFY_TRACE) {
-
-      afl->simplified_n_fuzz = ck_alloc(N_FUZZ_SIZE_BITMAP * sizeof(u8));
-
-    }
 
   }
 
@@ -2060,6 +2099,11 @@ int main(int argc, char **argv_orig, char **envp) {
   afl_realloc(AFL_BUF_PARAM(out), min_alloc);
   afl_realloc(AFL_BUF_PARAM(eff), min_alloc);
   afl_realloc(AFL_BUF_PARAM(ex), min_alloc);
+  if (afl->fsrv.use_ijon) {
+
+    afl_realloc((void **)&afl->ijon_input_data, min_alloc);
+
+  }
 
   afl->fsrv.use_fauxsrv = afl->non_instrumented_mode == 1 || afl->no_forkserver;
   afl->fsrv.max_length = afl->max_length;
@@ -2735,39 +2779,11 @@ int main(int argc, char **argv_orig, char **envp) {
    * forkserver handshake */
   if (unlikely(afl->fsrv.use_ijon)) {
 
-  #ifdef __linux__
-    if (afl->fsrv.nyx_mode) {
-
-      FATAL(
-          "IJON mode is not compatible with nyx mode (-X/-Y). Nyx uses full "
-          "system emulation with different memory management.");
-
-    }
-
-  #endif
-
-    if (afl->fsrv.map_size <= 4 + MAP_SIZE_IJON_BYTES + MAP_SIZE_IJON_MAP) {
-
-      FATAL("target forkserver reports too small map for IJON - BUG!");
-
-    }
-
-    // For fastresume: target already has full map allocated, use it as-is
-    // For fresh sessions: subtract IJON bytes from total map to get coverage
-    // map size
-    if (!fast_resume) {
-
-      afl->fsrv.map_size -= MAP_SIZE_IJON_BYTES;
-      afl->fsrv.real_map_size -= MAP_SIZE_IJON_BYTES;
-
-    }
+    configure_ijon_runtime(afl);
 
     OKF("IJON map: coverage bytes %u, ijon map bytes %u, ijon max size %u",
         (u32)(afl->fsrv.map_size - MAP_SIZE_IJON_MAP), (u32)MAP_SIZE_IJON_MAP,
         (u32)MAP_SIZE_IJON_BYTES);
-
-    /* Calculate IJON offset based on mode */
-    afl->ijon_bits = (u64 *)(afl->fsrv.trace_bits + afl->fsrv.map_size);
 
     char *max_dir = alloc_printf("%s/ijon_max", afl->out_dir);
     afl->ijon_state = new_ijon_min_state(max_dir);
@@ -2775,16 +2791,13 @@ int main(int argc, char **argv_orig, char **envp) {
 
     setenv("AFL_NO_IJON", "1", 1);
 
-    // Initialize IJON shared access for dynamic offset calculation
-    afl->ijon_shared_access = setup_dynamic_shared_access(
-        afl->fsrv.trace_bits, afl->fsrv.map_size, afl->fsrv.real_map_size);
-
   }
 
   san_abstraction = getenv("AFL_SAN_ABSTRACTION");
   if (!san_abstraction || !strcmp(san_abstraction, "simplify_trace")) {
 
     afl->san_abstraction = SIMPLIFY_TRACE;
+    afl->simplified_n_fuzz = ck_alloc(N_FUZZ_SIZE_BITMAP * sizeof(u8));
 
   } else if (!strcmp(san_abstraction, "coverage_increase")) {
 
@@ -2793,6 +2806,7 @@ int main(int argc, char **argv_orig, char **envp) {
   } else if (!strcmp(san_abstraction, "unique_trace")) {
 
     afl->san_abstraction = UNIQUE_TRACE;
+    afl->n_fuzz_dup = ck_alloc(N_FUZZ_SIZE_BITMAP * sizeof(u8));
 
   } else {
 
@@ -2968,6 +2982,7 @@ int main(int argc, char **argv_orig, char **envp) {
   if (afl->fsrv.out_file && afl->fsrv.use_shmem_fuzz) {
 
     unlink(afl->fsrv.out_file);
+    if (afl->fsrv.out_file) { ck_free(afl->fsrv.out_file); }
     afl->fsrv.out_file = NULL;
     afl->fsrv.use_stdin = 0;
     close(afl->fsrv.out_fd);
@@ -3022,9 +3037,18 @@ int main(int argc, char **argv_orig, char **envp) {
             saved_ijon_state.ijon_offset, saved_ijon_state.map_size,
             saved_ijon_state.real_map_size, saved_ijon_state.target_map_size);
 
-        // Update afl->ijon_bits to use the saved offset
-        afl->ijon_bits =
-            (u64 *)(afl->fsrv.trace_bits + saved_ijon_state.ijon_offset);
+        afl->fsrv.use_ijon = 1;
+        afl->fsrv.map_size = saved_ijon_state.map_size;
+        afl->fsrv.real_map_size = saved_ijon_state.real_map_size;
+        afl->ijon_bits = (u64 *)(afl->fsrv.trace_bits + afl->fsrv.map_size);
+
+        if (afl->ijon_shared_access) {
+
+          afl->ijon_shared_access->ijon_offset = afl->fsrv.map_size;
+          afl->ijon_shared_access->ijon_max_area =
+              (u64 *)(afl->fsrv.trace_bits + afl->fsrv.map_size);
+
+        }
 
       }
 
@@ -3197,18 +3221,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
         // Enable IJON now that forkserver handshake is complete
         afl->fsrv.use_ijon = 1;
-
-        // Don't override the new forkserver map_size, just update ijon_bits
-        // pointer Use the saved offset to maintain consistency
-        afl->ijon_bits =
-            (u64 *)(afl->fsrv.trace_bits + restored_state->ijon_offset);
-
-        // Initialize IJON shared access with saved offset for fastresume
-        afl->ijon_shared_access = (dynamic_shared_access_t *)ck_alloc(
-            sizeof(dynamic_shared_access_t));
-        afl->ijon_shared_access->ijon_offset = restored_state->ijon_offset;
-        afl->ijon_shared_access->ijon_max_area =
-            (u64 *)(afl->fsrv.trace_bits + restored_state->ijon_offset);
+        configure_ijon_runtime(afl);
 
       }
 
@@ -4003,10 +4016,17 @@ stop_fuzzing:
   ck_free(afl->n_fuzz);
   ck_free(afl->n_fuzz_dup);
   ck_free(afl->simplified_n_fuzz);
+  if (afl->frameshift_index_buffer) { free(afl->frameshift_index_buffer); }
+  if (afl->fs_curr_meta) {
+
+    if (afl->fs_curr_meta->relations) { free(afl->fs_curr_meta->relations); }
+    free(afl->fs_curr_meta);
+
+  }
 
   if (afl->orig_cmdline) { ck_free(afl->orig_cmdline); }
   ck_free(afl->fsrv.target_path);
-  ck_free(afl->fsrv.out_file);
+  if (afl->fsrv.out_file) { ck_free(afl->fsrv.out_file); }
   ck_free(afl->sync_id);
   if (afl->q_testcase_cache) { ck_free(afl->q_testcase_cache); }
   afl_state_deinit(afl);

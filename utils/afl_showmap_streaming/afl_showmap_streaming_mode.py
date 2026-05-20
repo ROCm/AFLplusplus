@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 class ExitStatus(IntEnum):
-    """Exit status from streaming protocol (bits 0-1 of status field)."""
+    """Exit status from streaming protocol (bits [0:1] of status field)."""
 
     EXITED = 0   # Normal exit
     TIMEOUT = 1  # Execution timed out
@@ -33,14 +33,14 @@ class ExitStatus(IntEnum):
 
 
 # Status field layout (u16):
-#   bits 0-1:  exit status (0=exited, 1=timeout, 2=crash)
-#   bits 2-7:  reserved (must be 0)
-#   bits 8-15: signal number (only valid when status=crash)
+#   bits [0:1]:  exit status (0=exited, 1=timeout, 2=crash)
+#   bits [2:7]:  reserved (must be 0)
+#   bits [8:15]: WEXITSTATUS (when exited) or WTERMSIG (when crash)
 
 # Masks for status field parsing
-_STATUS_EXIT_MASK = 0x0003      # bits 0-1
-_STATUS_RESERVED_MASK = 0x00FC  # bits 2-7 (must be 0)
-_STATUS_SIGNAL_SHIFT = 8        # bits 8-15
+_STATUS_EXIT_MASK = 0x0003      # bits [0:1]
+_STATUS_RESERVED_MASK = 0x00FC  # bits [2:7] (must be 0)
+_STATUS_INFO_SHIFT = 8          # bits [8:15]
 
 
 class AflShowmapStreaming:
@@ -88,7 +88,11 @@ class AflShowmapStreaming:
         self._proc.stdin.flush()
 
     def _recv(self) -> "tuple[ExitStatus, signal.Signals | None, list[tuple[int, int]]]":
-        """Receive: [u16 status][u32 count][{u32 edge_idx, u8 hit_ctr} * count].
+        """Receive one response from the streaming protocol.
+
+        Wire format:
+            [u16 status][u32 count][{u32 edge_idx, u8 hit_ctr} * count]
+            [u32 stdout_len][u8 stdout_data*][u32 stderr_len][u8 stderr_data*]
 
         Returns:
             (exit_status, crash_signal, edges) where:
@@ -107,14 +111,25 @@ class AflShowmapStreaming:
             )
 
         exit_status = ExitStatus(status_raw & _STATUS_EXIT_MASK)
-        signal_num = status_raw >> _STATUS_SIGNAL_SHIFT
-        crash_signal = signal.Signals(signal_num) if signal_num else None
+        info_value = status_raw >> _STATUS_INFO_SHIFT
+        crash_signal = (
+            signal.Signals(info_value) if exit_status == ExitStatus.CRASH and info_value else None
+        )
 
         edge_count = struct.unpack("<I", self._read_exactly(4))[0]
         edge_data = self._read_exactly(edge_count * 5)
         edges = [
             struct.unpack_from("<IB", edge_data, i * 5) for i in range(edge_count)
         ]
+
+        # Read stdout/stderr LV fields (currently always length=0)
+        stdout_len = struct.unpack("<I", self._read_exactly(4))[0]
+        if stdout_len > 0:
+            self._read_exactly(stdout_len)  # discard
+        stderr_len = struct.unpack("<I", self._read_exactly(4))[0]
+        if stderr_len > 0:
+            self._read_exactly(stderr_len)  # discard
+
         return exit_status, crash_signal, edges
 
     def _read_exactly(self, n: int) -> bytes:

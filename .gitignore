@@ -13,6 +13,7 @@
 .test
 .test2
 .vscode
+afl-cmin.awk.8
 afl-addseeds.8
 afl-analyze
 afl-analyze.8

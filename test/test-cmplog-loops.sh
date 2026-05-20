@@ -2,7 +2,7 @@
 # Test cmplog back-edge detection - each test should have 0 hooks (loop compare only)
 cd "$(dirname "$0")/.." || exit 1
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'; GREY="\033[1;90m"
 PASS=0; FAIL=0
 
 test_loop() {
@@ -13,10 +13,10 @@ test_loop() {
     hooks=$(sed -n '/^define.*@test(/,/^}$/p' /tmp/t.ll 2>/dev/null | grep -c "__cmplog_ins_hook" 2>/dev/null)
     hooks=${hooks:-0}
     if [ "$hooks" -eq 0 ]; then
-        printf "%-12s hooks=%d ${GREEN}PASS${NC}\n" "$name" "$hooks"
+        #printf "$GREEN[+] %-12s hooks=%d PASS$\n" "$name" "$hooks"
         ((PASS++))
     else
-        printf "%-12s hooks=%d ${RED}FAIL${NC}\n" "$name" "$hooks"
+        printf "$RED[-] %-12s hooks=%d FAIL$\n" "$name" "$hooks"
         ((FAIL++))
     fi
 }
@@ -32,5 +32,5 @@ test_loop "nested" '__attribute__((noinline,optnone)) int test(int n) { int s=0;
 test_loop "countdown" '__attribute__((noinline,optnone)) int test(int n) { int s=0; for(int i=n-1;i>=0;i--) s+=i; return s; } int main(){return test(10);}'
 
 rm -f /tmp/t.c /tmp/t.ll
-echo ""; echo "Results: $PASS passed, $FAIL failed"
+echo -e "$GREY[*] Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

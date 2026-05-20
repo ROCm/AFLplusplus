@@ -3,7 +3,7 @@
    ------------------------------------------------
 
    Copyright 2015, 2016 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -65,7 +65,20 @@ __attribute__((weak)) void __sanitizer_symbolize_pc(void *, const char *fmt,
 #include <errno.h>
 
 #include <sys/mman.h>
-#if !defined(__HAIKU__) && !defined(__OpenBSD__)
+#ifdef __linux__
+  #include <linux/futex.h>
+  #include <sys/prctl.h>
+  #include <sys/syscall.h>
+
+static inline long sys_futex(void *uaddr, int op, int val,
+                             const struct timespec *timeout, void *uaddr2,
+                             int val3) {
+
+  return syscall(__NR_futex, uaddr, op, val, timeout, uaddr2, val3);
+
+}
+
+#elif !defined(__HAIKU__) && !defined(__OpenBSD__)
   #include <sys/syscall.h>
 #endif
 #ifndef USEMMAP
@@ -167,6 +180,7 @@ static u8 *__afl_area_ptr_backup = __afl_area_initial;
 
 u8        *__afl_area_ptr = __afl_area_initial;
 u8        *__afl_dictionary;
+u32       *__afl_child_sync = NULL;
 u8        *__afl_fuzz_ptr;
 static u32 __afl_fuzz_len_dummy;
 u32       *__afl_fuzz_len = &__afl_fuzz_len_dummy;
@@ -298,8 +312,7 @@ static void (*old_sigterm_handler)(int) = 0;
 static u8 is_persistent;
 
 /* Are we in sancov mode? */
-
-static u8 _is_sancov;
+// static u8 _is_sancov;
 
 /* Debug? */
 
@@ -463,6 +476,35 @@ static void __afl_map_shm(void) {
 
   if (__afl_already_initialized_shm) return;
   __afl_already_initialized_shm = 1;
+
+#ifdef __linux__
+  {
+
+    char *child_sync_shm = getenv("AFL_CHILD_SYNC_SHM");
+    if (child_sync_shm) {
+
+  #ifdef USEMMAP
+      int shm_fd = shm_open(child_sync_shm, O_RDWR, 0600);
+      if (shm_fd != -1) {
+
+        __afl_child_sync = (u32 *)mmap(0, sizeof(u32), PROT_READ | PROT_WRITE,
+                                       MAP_SHARED, shm_fd, 0);
+        if (__afl_child_sync == MAP_FAILED) __afl_child_sync = NULL;
+        close(shm_fd);
+
+      }
+
+  #else
+      int shm_id = atoi(child_sync_shm);
+      __afl_child_sync = (u32 *)shmat(shm_id, NULL, 0);
+      if (__afl_child_sync == (void *)-1) __afl_child_sync = NULL;
+  #endif
+
+    }
+
+  }
+
+#endif
 
   // if we are not running in afl ensure the map exists
   if (!__afl_area_ptr) { __afl_area_ptr = __afl_area_ptr_dummy; }
@@ -1012,7 +1054,7 @@ static void __afl_unmap_shm(void) {
 
 #ifdef USEMMAP
 
-    munmap((void *)__afl_cmp_map, __afl_map_size);
+    munmap((void *)__afl_cmp_map, sizeof(struct cmp_map));
 
 #else
 
@@ -1101,12 +1143,15 @@ static void __afl_start_forkserver(void) {
 
   }
 
-  if (getenv("LD_BIND_LAZY") == NULL) {
+  /* Disable as this seems to create problems in corner cases
+    if (getenv("LD_BIND_LAZY") == NULL) {
 
-    // prevent further executed programs to fuck up the coverage
-    setenv("AFL_DISABLE_LLVM_INSTRUMENTATION", "1", 1);
+      // prevent further executed programs to fuck up the coverage
+      setenv("AFL_DISABLE_LLVM_INSTRUMENTATION", "1", 1);
 
-  }
+    }
+
+  */
 
   if (getenv("AFL_OLD_FORKSERVER")) {
 
@@ -1155,6 +1200,7 @@ static void __afl_start_forkserver(void) {
     // send the set/requested options to forkserver
     status = FS_NEW_OPT_MAPSIZE;  // we always send the map size
     if (__afl_sharedmem_fuzzing) { status |= FS_NEW_OPT_SHDMEM_FUZZ; }
+    if (__afl_child_sync) { status |= FS_NEW_OPT_FUTEX; }
     if (__afl_dictionary_len && __afl_dictionary) {
 
       status |= FS_NEW_OPT_AUTODICT;
@@ -1178,6 +1224,8 @@ static void __afl_start_forkserver(void) {
     if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
 
     // FS_NEW_OPT_SHDMEM_FUZZ - no data
+
+    // FS_NEW_OPT_FUTEX - no data
 
     // FS_NEW_OPT_AUTODICT - send autodictionary
     if (__afl_dictionary_len && __afl_dictionary) {
@@ -1354,14 +1402,27 @@ static void __afl_start_forkserver(void) {
 
     if (likely(WIFSTOPPED(status))) { child_stopped = 1; }
 
-    /* Relay wait status to pipe, then loop back. */
-
+    /* Relay wait status to pipe BEFORE signaling via futex.  The fuzzer reads
+       the pipe immediately after waking on AFL_CHILD_EXITED; writing first
+       guarantees the data is already there and avoids a blocking pipe read. */
     if (unlikely(write(FORKSRV_FD + 1, &status, 4) != 4)) {
 
       write_error("writing to afl-fuzz");
       _exit(1);
 
     }
+
+#ifdef __linux__
+    if (!child_stopped && likely(__afl_child_sync)) {
+
+      /* Child exited (crash or normal cycle end). Signal the fuzzer
+         via futex; pipe data is already written above. */
+      __atomic_store_n(__afl_child_sync, AFL_CHILD_EXITED, __ATOMIC_RELEASE);
+      sys_futex(__afl_child_sync, FUTEX_WAKE, 1, NULL, NULL, 0);
+
+    }
+
+#endif
 
   }
 
@@ -1443,7 +1504,32 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
 #endif
 
-    raise(SIGSTOP);
+#ifdef __linux__
+    if (likely(__afl_child_sync)) {
+
+      /* Signal the fuzzer that this iteration is complete. */
+      __atomic_store_n(__afl_child_sync, AFL_CHILD_DONE, __ATOMIC_RELEASE);
+      sys_futex(__afl_child_sync, FUTEX_WAKE, 1, NULL, NULL, 0);
+
+      /* Wait until the fuzzer signals us to run the next test case.
+         No timeout needed: PR_SET_PDEATHSIG ensures the kernel delivers
+         SIGKILL if the forkserver (our parent) dies. */
+      u32 sync_val;
+      while ((sync_val = __atomic_load_n(__afl_child_sync, __ATOMIC_ACQUIRE)) ==
+             AFL_CHILD_DONE) {
+
+        sys_futex(__afl_child_sync, FUTEX_WAIT, AFL_CHILD_DONE, NULL, NULL, 0);
+
+      }
+
+      /* The fuzzer may set EXITED (e.g. timeout with a non-fatal kill signal
+         such as SIGTERM) to request a clean exit instead of another run. */
+      if (unlikely(sync_val == AFL_CHILD_EXITED)) { _exit(0); }
+
+    } else
+
+#endif
+      raise(SIGSTOP);
 
     __afl_area_ptr[0] = 1;
     if (unlikely(__afl_ijon_state)) { __afl_ijon_state = 0; }
@@ -1682,7 +1768,7 @@ void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
 void afl_read_pc_filter_file(const char *filter_file) {
 
   FILE *file;
-  char  ch;
+  int   ch;
 
   file = fopen(filter_file, "r");
   if (file == NULL) {
@@ -2092,7 +2178,7 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
   u32   inst_ratio = 100;
   char *x;
 
-  _is_sancov = 1;
+  //_is_sancov = 1;
 
   if (!getenv("AFL_DUMP_MAP_SIZE")) {
 
@@ -2694,26 +2780,40 @@ void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *cases) {
 
 }
 
-__attribute__((weak)) void *__asan_region_is_poisoned(void *beg, size_t size) {
-
-  return NULL;
-
-}
+#ifdef __APPLE__
+__attribute__((weak_import)) void *__asan_region_is_poisoned(void  *beg,
+                                                             size_t size);
+#else
+__attribute__((weak)) void *__asan_region_is_poisoned(void *beg, size_t size);
+#endif
 
 // POSIX shenanigan to see if an area is mapped.
 // If it is mapped as X-only, we have a problem, so maybe we should add a check
 // to avoid to call it on .text addresses
 static int area_is_valid(void *ptr, size_t len) {
 
-  if (unlikely(!ptr || __asan_region_is_poisoned(ptr, len))) { return 0; }
+  if (unlikely(!ptr || (__asan_region_is_poisoned &&
+                        __asan_region_is_poisoned(ptr, len)))) {
+
+    return 0;
+
+  }
 
 #ifdef __HAIKU__
   long r = _kern_write(__afl_dummy_fd[1], -1, ptr, len);
 #elif defined(__OpenBSD__)
   long r = write(__afl_dummy_fd[1], ptr, len);
+#elif defined(__APPLE__) && defined(__MACH__)
+  /* syscall(2) is flagged deprecated on modern macOS, but the BSD numbers
+     in <sys/syscall.h> remain stable and we deliberately want the raw
+     syscall here to avoid libc/sanitizer interception on this hot path. */
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  long r = syscall(SYS_write, __afl_dummy_fd[1], ptr, len);
+  #pragma GCC diagnostic pop
 #else
   long r = syscall(SYS_write, __afl_dummy_fd[1], ptr, len);
-#endif  // HAIKU, OPENBSD
+#endif  // HAIKU, OPENBSD, APPLE
 
   if (r <= 0 || r > len) return 0;
 
@@ -2782,32 +2882,33 @@ static u8 get_prog_addr_attr(const void *addr) {
 
 #endif
 
-/* hook for string with length functions, eg. strncmp, strncasecmp etc.
-   Note that we ignore the len parameter and take longer strings if present. */
+static inline u32 cmplog_string_len_with_nul(u32 len, u32 cap) {
+
+  return len < cap ? len + 1U : cap;
+
+}
+
+/* hook for string with length functions, eg. strncmp, strncasecmp etc. */
 void __cmplog_rtn_hook_strn(u8 *ptr1, u8 *ptr2, u64 len) {
 
   // fprintf(stderr, "RTN1 %p %p %u\n", ptr1, ptr2, len);
   if (likely(!__afl_cmp_map)) return;
+  if (unlikely(!ptr1 || !ptr2)) return;
   if (unlikely(!len || len > __afl_cmplog_max_len)) return;
 
-  int len0 = MIN(len, 32);
+  u32 cap = (u32)MIN(len, 32ULL);
+  int l1 = area_is_valid(ptr1, cap);
+  int l2 = area_is_valid(ptr2, cap);
+  if (l1 <= 0 || l2 <= 0) return;
 
-  int len1 = strnlen(ptr1, len0);
+  cap = (u32)MIN(l1, l2);
 
-  int len2 = strnlen(ptr2, len0);
+  u32 len1 = (u32)strnlen((char *)ptr1, cap);
+  u32 len2 = (u32)strnlen((char *)ptr2, cap);
 
-  int l;
-  if (!len1)
-    l = len2;
-  else if (!len2)
-    l = len1;
-  else
-    l = MAX(len1, len2);
+  u32 l = MAX(cmplog_string_len_with_nul(len1, cap),
+              cmplog_string_len_with_nul(len2, cap));
 
-  l = area_is_valid(ptr1, l + 1);
-  l = area_is_valid(ptr2, l + 1);
-
-  if (l > 32) l = 32;
   if (l < 2) return;
 
   uintptr_t k = (uintptr_t)__builtin_return_address(0);
@@ -2845,7 +2946,7 @@ void __cmplog_rtn_hook_strn(u8 *ptr1, u8 *ptr2, u64 len) {
 #ifdef __linux__
   u8 attr1 = get_prog_addr_attr(ptr1);
   u8 attr2 = get_prog_addr_attr(ptr2);
-  cmpfn->addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
+  cmpfn[hits].addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
 #endif
 
 }
@@ -2856,20 +2957,16 @@ void __cmplog_rtn_hook_str(u8 *ptr1, u8 *ptr2) {
   // fprintf(stderr, "RTN1 %p %p\n", ptr1, ptr2);
   if (likely(!__afl_cmp_map)) return;
   if (unlikely(!ptr1 || !ptr2)) return;
-  int len1 = strnlen(ptr1, 31) + 1;
-  int len2 = strnlen(ptr2, 31) + 1;
 
-  int l;
-  if (!len1)
-    l = len2;
-  else if (!len2)
-    l = len1;
-  else
-    l = MAX(len1, len2);
-  l = area_is_valid(ptr1, l + 1);
-  l = area_is_valid(ptr2, l + 1);
+  int l1 = area_is_valid(ptr1, 32);
+  int l2 = area_is_valid(ptr2, 32);
+  if (l1 <= 0 || l2 <= 0) return;
 
-  if (l > 32) l = 32;
+  u32 cap = (u32)MIN(l1, l2);
+  u32 len1 = cmplog_string_len_with_nul((u32)strnlen((char *)ptr1, cap), cap);
+  u32 len2 = cmplog_string_len_with_nul((u32)strnlen((char *)ptr2, cap), cap);
+  u32 l = MAX(len1, len2);
+
   if (l < 2) return;
 
   uintptr_t k = (uintptr_t)__builtin_return_address(0);
@@ -2907,7 +3004,7 @@ void __cmplog_rtn_hook_str(u8 *ptr1, u8 *ptr2) {
 #ifdef __linux__
   u8 attr1 = get_prog_addr_attr(ptr1);
   u8 attr2 = get_prog_addr_attr(ptr2);
-  cmpfn->addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
+  cmpfn[hits].addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
 #endif
 
 }
@@ -2971,7 +3068,7 @@ void __cmplog_rtn_hook(u8 *ptr1, u8 *ptr2) {
 #ifdef __linux__
   u8 attr1 = get_prog_addr_attr(ptr1);
   u8 attr2 = get_prog_addr_attr(ptr2);
-  cmpfn->addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
+  cmpfn[hits].addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
 #endif
 
 }
@@ -3043,7 +3140,7 @@ void __cmplog_rtn_hook_n(u8 *ptr1, u8 *ptr2, u64 len) {
   #ifdef __linux__
   u8 attr1 = get_prog_addr_attr(ptr1);
   u8 attr2 = get_prog_addr_attr(ptr2);
-  cmpfn->addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
+  cmpfn[hits].addr_attr = ADDR_ATTR_COMBINE(attr1, attr2);
   #endif
 
 #endif
@@ -3429,6 +3526,13 @@ void ijon_min(uint32_t addr, u64 val) {
 
 }
 
+void ijon_max_until(uint32_t addr, u64 val, u64 limit) {
+
+  u64 encoded = val >= limit ? UINT64_MAX : UINT64_MAX - limit + val;
+  ijon_max(addr, encoded);
+
+}
+
 void ijon_set(uint32_t loc_addr, uint32_t val) {
 
   if (unlikely(!__afl_ijon_enabled)) return;
@@ -3585,6 +3689,56 @@ uint32_t ijon_hashstack(void) {
 
 /* String and memory distance functions */
 
+#define IJON_DIST_MAX_LEN 1024
+#define IJON_DIST_FUNC ijon_memprogress_prefix
+
+static inline uint32_t ijon_memprogress_prefix(const char *a, const char *b,
+                                               uint32_t len) {
+
+  const unsigned char *pa = (const unsigned char *)a;
+  const unsigned char *pb = (const unsigned char *)b;
+
+  uint32_t matches = 0;
+  while (matches < len && pa[matches] == pb[matches])
+    ++matches;
+
+  return matches;
+
+}
+
+/* maybe switch to this:
+
+static inline uint32_t ijon_memprogress_matches(const char *a, const char *b,
+                                                uint32_t len) {
+
+  const unsigned char *pa = (const unsigned char *)a;
+  const unsigned char *pb = (const unsigned char *)b;
+
+  uint32_t matches = 0;
+  for (uint32_t i = 0; i < len; ++i) {
+
+    matches += (uint32_t)(pa[i] == pb[i]);
+
+  }
+
+  return matches;
+
+}
+
+*/
+
+uint32_t ijon_memdist(char *a, char *b, size_t len) {
+
+  if (unlikely(!a && !b)) return 0;
+  if (unlikely(!a || !b))
+    return len > (size_t)UINT32_MAX ? UINT32_MAX : (uint32_t)len;
+  if (unlikely(len == 0)) return 0;
+
+  return IJON_DIST_FUNC(a, b,
+                        len >= IJON_DIST_MAX_LEN ? IJON_DIST_MAX_LEN : len);
+
+}
+
 uint32_t ijon_strdist(char *a, char *b) {
 
   if (!a && !b) return 0;
@@ -3594,81 +3748,9 @@ uint32_t ijon_strdist(char *a, char *b) {
   size_t len_a = strlen(a);
   size_t len_b = strlen(b);
 
-  return ijon_memdist(a, b, len_a > len_b ? len_a : len_b);
+  uint32_t len = (uint32_t)MIN(MAX(len_a, len_b), IJON_DIST_MAX_LEN);
 
-}
-
-uint32_t ijon_memdist(char *a, char *b, size_t len) {
-
-  if (!a && !b) return 0;
-  if (!a || !b) return (uint32_t)len;
-  if (len == 0) return 0;
-
-  // For efficiency with large strings, use a bounded Levenshtein distance
-  // Limit the maximum distance calculation to avoid performance issues
-  size_t max_dist = len > 1024 ? 1024 : len;
-
-  // Use Levenshtein distance algorithm (edit distance)
-  // For memory efficiency, use a rolling array approach for large strings
-  if (max_dist <= 256) {
-
-    // Small strings: use full matrix approach
-    uint32_t matrix[257][257];  // max_dist + 1
-
-    // Initialize first row and column
-    for (size_t i = 0; i <= max_dist; i++) {
-
-      matrix[i][0] = i;
-      matrix[0][i] = i;
-
-    }
-
-    // Fill the matrix
-    for (size_t i = 1; i <= max_dist && i <= strlen(a); i++) {
-
-      for (size_t j = 1; j <= max_dist && j <= strlen(b); j++) {
-
-        uint32_t cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
-
-        uint32_t deletion = matrix[i - 1][j] + 1;
-        uint32_t insertion = matrix[i][j - 1] + 1;
-        uint32_t substitution = matrix[i - 1][j - 1] + cost;
-
-        matrix[i][j] =
-            deletion < insertion
-                ? (deletion < substitution ? deletion : substitution)
-                : (insertion < substitution ? insertion : substitution);
-
-      }
-
-    }
-
-    size_t actual_len_a = strlen(a) > max_dist ? max_dist : strlen(a);
-    size_t actual_len_b = strlen(b) > max_dist ? max_dist : strlen(b);
-
-    return matrix[actual_len_a][actual_len_b];
-
-  } else {
-
-    // Large strings: use simplified byte-by-byte comparison with early
-    // termination
-    uint32_t differences = 0;
-    size_t   min_len = strlen(a) < strlen(b) ? strlen(a) : strlen(b);
-    size_t   max_len = strlen(a) > strlen(b) ? strlen(a) : strlen(b);
-
-    // Count character differences up to min_len
-    for (size_t i = 0; i < min_len && i < max_dist; i++) {
-
-      if (a[i] != b[i]) { differences++; }
-
-    }
-
-    // Add length difference
-    differences += (uint32_t)(max_len - min_len);
-
-    return differences > max_dist ? max_dist : differences;
-
-  }
+  return IJON_DIST_FUNC(a, b, len);
 
 }
 

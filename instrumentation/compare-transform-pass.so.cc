@@ -287,33 +287,53 @@ bool CompareTransform::transformCmps(Module &M, const bool processStrcmp,
            * prototype */
           FunctionType *FT = Callee->getFunctionType();
 
-          isStrcmp &=
-              FT->getNumParams() == 2 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
-          isStrcasecmp &=
-              FT->getNumParams() == 2 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
+          isStrcmp &= FT->getNumParams() == 2 &&
+                      FT->getReturnType()->isIntegerTy(32) &&
+                      FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                      FT->getParamType(0)->isPointerTy();
+#else
+                      FT->getParamType(0) ==
+                          IntegerType::getInt8Ty(M.getContext())
+                              ->getPointerTo(0);
+#endif
+          isStrcasecmp &= FT->getNumParams() == 2 &&
+                          FT->getReturnType()->isIntegerTy(32) &&
+                          FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                          FT->getParamType(0)->isPointerTy();
+#else
+                          FT->getParamType(0) ==
+                              IntegerType::getInt8Ty(M.getContext())
+                                  ->getPointerTo(0);
+#endif
           isMemcmp &= FT->getNumParams() == 3 &&
                       FT->getReturnType()->isIntegerTy(32) &&
                       FT->getParamType(0)->isPointerTy() &&
                       FT->getParamType(1)->isPointerTy() &&
                       FT->getParamType(2)->isIntegerTy();
-          isStrncmp &=
-              FT->getNumParams() == 3 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0) &&
-              FT->getParamType(2)->isIntegerTy();
-          isStrncasecmp &=
-              FT->getNumParams() == 3 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0) &&
-              FT->getParamType(2)->isIntegerTy();
+          isStrncmp &= FT->getNumParams() == 3 &&
+                       FT->getReturnType()->isIntegerTy(32) &&
+                       FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                       FT->getParamType(0)->isPointerTy() &&
+#else
+                       FT->getParamType(0) ==
+                           IntegerType::getInt8Ty(M.getContext())
+                               ->getPointerTo(0) &&
+#endif
+                       FT->getParamType(2)->isIntegerTy();
+          isStrncasecmp &= FT->getNumParams() == 3 &&
+                           FT->getReturnType()->isIntegerTy(32) &&
+                           FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                           FT->getParamType(0)->isPointerTy() &&
+#else
+                           FT->getParamType(0) ==
+                               IntegerType::getInt8Ty(M.getContext())
+                                   ->getPointerTo(0) &&
+#endif
+                           FT->getParamType(2)->isIntegerTy();
 
           if (!isStrcmp && !isMemcmp && !isStrncmp && !isStrcasecmp &&
               !isStrncasecmp && !isIntMemcpy)
@@ -733,9 +753,9 @@ bool CompareTransform::transformCmps(Module &M, const bool processStrcmp,
         IRBuilder<> cur_lenchk_IRB(cur_lenchk_bb);
         Value      *icmp = cur_lenchk_IRB.CreateICmpEQ(
             sizedValue, ConstantInt::get(sizedValue->getType(), i));
-        if (cur_lenchk_bb->getTerminator()) {
+        if (auto *T = aflTerminatorOrNull(cur_lenchk_bb)) {
 
-          cur_lenchk_bb->getTerminator()->eraseFromParent();
+          T->eraseFromParent();
 
         }
 
@@ -810,11 +830,7 @@ bool CompareTransform::transformCmps(Module &M, const bool processStrcmp,
 
         Value *icmp =
             cur_cmp_IRB.CreateICmpEQ(isub, ConstantInt::get(Int8Ty, 0));
-        if (cur_cmp_bb->getTerminator()) {
-
-          cur_cmp_bb->getTerminator()->eraseFromParent();
-
-        }
+        if (auto *T = aflTerminatorOrNull(cur_cmp_bb)) { T->eraseFromParent(); }
 
         cur_cmp_IRB.CreateCondBr(
             icmp, next_lenchk_bb ? next_lenchk_bb : next_cmp_bb, end_bb);
@@ -822,11 +838,7 @@ bool CompareTransform::transformCmps(Module &M, const bool processStrcmp,
       } else {
 
         // Last iteration - add terminator to current block
-        if (cur_cmp_bb->getTerminator()) {
-
-          cur_cmp_bb->getTerminator()->eraseFromParent();
-
-        }
+        if (auto *T = aflTerminatorOrNull(cur_cmp_bb)) { T->eraseFromParent(); }
 
         BranchInst::Create(end_bb, cur_cmp_bb);
 

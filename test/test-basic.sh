@@ -12,7 +12,6 @@ $ECHO "$BLUE[*] Testing: ${AFL_COMPILER}, afl-showmap, afl-fuzz, afl-cmin and af
    AFL_HARDEN=1 ../${AFL_COMPILER} -o test-compcov.harden test-compcov.c > /dev/null 2>&1
    test -e test-instr.plain && {
     chmod +x test-instr.plain
-    ls -l test-instr.plain
     $ECHO "$GREEN[+] ${AFL_COMPILER} compilation succeeded"
     # Test if different inputs in stdin mode produce different coverage.
     echo 0 | AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.plain.0 -r -- ./test-instr.plain > /dev/null 2>&1

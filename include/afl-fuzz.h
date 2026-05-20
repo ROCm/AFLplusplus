@@ -10,7 +10,7 @@
                      Heiko Eissfeldt <heiko.eissfeldt@hexco.de>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -686,6 +686,10 @@ typedef struct afl_state {
 
   double *alias_probability;            /* alias weighted probabilities     */
   u32    *alias_table;                /* alias weighted random lookup table */
+  u32     alias_map_size;             /* allocated capacity of alias arrays */
+  u32    *splice_buf_ids;             /* pre-filtered splice candidate IDs  */
+  u32     splice_buf_count;           /* number of splice candidates        */
+  u32     splice_buf_alloc;           /* allocated capacity of splice_buf   */
   u32     active_items;                 /* enabled entries in the queue     */
 
   u8 *var_bytes;                        /* Bytes that appear to be variable */
@@ -962,6 +966,8 @@ typedef struct afl_state {
   time_t          last_ijon_log_time;   /* Rate limiting for IJON UI output */
   u8             *ijon_input_data;    /* Currently executed IJON input data */
   u32             ijon_input_len; /* Length of currently executed IJON input */
+  u8             *ijon_cur_input; /* current input buf passed to IJON check */
+  u32             ijon_cur_input_len; /* length of ijon_cur_input            */
   u8              is_doing_ijon;      /* Flag to track IJON execution state */
   dynamic_shared_access_t
       *ijon_shared_access;         /* IJON shared access for dynamic offset */
@@ -1282,6 +1288,7 @@ void        deinit_py(void *);
 /* Queue */
 
 void mark_as_det_done(afl_state_t *, struct queue_entry *);
+void mark_as_variable(afl_state_t *, struct queue_entry *);
 void add_to_queue(afl_state_t *, u8 *, u32, u8);
 void destroy_queue(afl_state_t *);
 void update_bitmap_score(afl_state_t *, struct queue_entry *, bool);
@@ -1405,7 +1412,7 @@ void   check_if_tty(afl_state_t *);
 void   save_cmdline(afl_state_t *, u32, char **);
 void   read_foreign_testcases(afl_state_t *, int);
 void   write_crash_readme(afl_state_t *afl);
-u8     check_if_text_buf(u8 *buf, u32 len);
+u32    check_if_text_buf(u8 *buf, u32 len);
 #ifndef AFL_SHOWMAP
 void setup_signal_handlers(void);
 #endif

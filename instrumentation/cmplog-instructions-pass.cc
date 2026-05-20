@@ -5,7 +5,7 @@
    Written by Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2015, 2016 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -47,9 +47,14 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/Support/raw_ostream.h"
+#if LLVM_MAJOR <= 15
+  #include "llvm/ADT/Triple.h"
+#endif
 
 #include <set>
 #include "afl-llvm-common.h"
+
+static bool is_64_arch = false;
 
 using namespace llvm;
 
@@ -185,16 +190,17 @@ bool CmpLogInstructions::hookInstrs(Module &M, LoopInfoCallback LICallback) {
   FunctionCallee c8 = M.getOrInsertFunction("__cmplog_ins_hook8", VoidTy,
                                             Int64Ty, Int64Ty, Int8Ty);
   FunctionCallee cmplogHookIns8 = c8;
+  [[maybe_unused]] FunctionCallee cmplogHookIns16;
+  [[maybe_unused]] FunctionCallee cmplogHookInsN;
 
-#if INTPTR_MAX != INT32_MAX
-  FunctionCallee c16 = M.getOrInsertFunction("__cmplog_ins_hook16", VoidTy,
-                                             Int128Ty, Int128Ty, Int8Ty);
-  FunctionCallee cmplogHookIns16 = c16;
+  if (is_64_arch) {
 
-  FunctionCallee cN = M.getOrInsertFunction("__cmplog_ins_hookN", VoidTy,
-                                            Int128Ty, Int128Ty, Int8Ty, Int8Ty);
-  FunctionCallee cmplogHookInsN = cN;
-#endif
+    cmplogHookIns16 = M.getOrInsertFunction("__cmplog_ins_hook16", VoidTy,
+                                            Int128Ty, Int128Ty, Int8Ty);
+    cmplogHookInsN = M.getOrInsertFunction("__cmplog_ins_hookN", VoidTy,
+                                           Int128Ty, Int128Ty, Int8Ty, Int8Ty);
+
+  }
 
   GlobalVariable *AFLCmplogPtr = M.getNamedGlobal("__afl_cmp_map");
 
@@ -551,20 +557,21 @@ bool CmpLogInstructions::hookInstrs(Module &M, LoopInfoCallback LICallback) {
               IRB.CreateCall(cmplogHookIns8, args);
               break;
             case 128:
-#if INTPTR_MAX != INT32_MAX
-              if (use_hookN) {
+              if (is_64_arch) {
 
-                IRB.CreateCall(cmplogHookInsN, args);
+                if (use_hookN) {
 
-              } else {
+                  IRB.CreateCall(cmplogHookInsN, args);
 
-                IRB.CreateCall(cmplogHookIns16, args);
+                } else {
+
+                  IRB.CreateCall(cmplogHookIns16, args);
+
+                }
+
+                break;
 
               }
-
-#endif
-
-              break;
 
           }
 
@@ -597,6 +604,13 @@ PreservedAnalyses CmpLogInstructions::run(Module                &M,
     return &FAM.getResult<LoopAnalysis>(F);
 
   };
+
+#if LLVM_MAJOR <= 20
+  auto triple = Triple(M.getTargetTriple());
+#else
+  auto triple = M.getTargetTriple();
+#endif
+  if (triple.isArch64Bit()) { is_64_arch = true; }
 
   if (getenv("AFL_QUIET") == NULL)
     printf("Running cmplog-instructions-pass by andreafioraldi@gmail.com\n");

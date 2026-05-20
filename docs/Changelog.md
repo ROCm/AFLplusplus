@@ -4,7 +4,33 @@
   release of the tool. See README.md for the general instruction manual.
 
 
-### Version ++4.36a (dev)
+### Version ++4.41a (dev)
+  - Switched https://github.com/AFLplusplus/cov-analysis for outdated afl-cov
+  - MacOS most current version support for afl-fuzz, afl-cc (incl. LTO) and
+    frida mode
+  - Linux persistent mode uses futex now which increases speed and reduces
+    system call overhead (opt out with AFL_FAST_CHILD_SYNC), thanks to
+    @martinus for most of the implementation!
+  - afl-fuzz:
+    - `-I tool` call now receives the new crash as a command line parameter
+    - changed to a better map classifier
+    - minor speed, leak and zombie enhancements
+    - somewhere we removed .state/variable/... now it is back :-)
+  - afl-cc:
+    - Add LLVM 23 support
+    - Fixes in the PCGUARD and LTO instrumentation that could lead to sanitizer
+      triggers in target binaries
+  - afl-cmin:
+    - nyx_mode is now working for all minimizer variants
+  - afl-showmap:
+    - no more .afl-showmap-temp-* files lying around
+  - IJON dist was changed to original IJON implementation: initial matching
+    bytes, max length is 1024
+  - lib* tools:
+    - MacOS support is back, thanks to @Jay-1409 !
+
+
+### Version ++4.40c (release)
   - afl-fuzz:
     - FrameShift integrated and enabled by default, disable with
       AFL_FRAMESHIFT_DISABLE and configure effort via
@@ -12,6 +38,7 @@
       (on average) it does nothing, at best it improves time to new coverage
       and total coverage unlocked. https://arxiv.org/pdf/2507.05421
       Thanks to @hgarrereyn for the PR!
+    - Fixed several potential crashes when using IJON
     - added `AFL_FORCE_FASTRESUME` which will ignore the saved hash of the
       target - but note it will only work if the coverage map size did not
       change
@@ -20,20 +47,25 @@
   - afl-cc:
     - LLVM 22 support (they are again switching around include files ...)
     - g_/curl_/xml_ string support for COMPCOV, thanks to @Prajwal-kp-18
-    - env `AFL_LLVM_DENY_EXEC` will abort any common exec calls
+    - optimized hidden CFG instrumentation (don't instrument vector selects)
+    - plugin optimization and fixes by @nbars, @kyakdan and @koltiradw
     - marked GCC plugins as unmaintained. We need someone who know gimple and
       is willing to fix the plugin issues, workarounds for gcc bugs and
       overall improve the plugin.
-    - optimize hidden CFG instrumentation (don't instrument vector selects)
+    - env `AFL_LLVM_DENY_EXEC` will abort any common exec calls
   - afl-cmin:
-    - new implementation in C by @kcwu - thanks! (it is the default now)
+    - new implementation in C by @kcwu - it is currenlty not built though
+      because of maturity issues, e.g. does not work with Nyx
     - afl-cmin.py was changing behaviour to hash the original filenames,
       this was reverted.
     - afl-cmin and afl-cmin.py honor `AFL_SHA1_FILENAMES` now
   - afl-showmap:
     - -f support added by Prajwal-kp-18 - thanks!
+    - faster stream mode by @nbars
   - qemu_mode:
     - fix when AFL_EXITPOINT is not set, which could prevent detecting crashes
+  - afl-plot:
+    - multiple AFL++ out directories now supported, thanks to @Jay-1409 !
 
 
 ### Version ++4.35a (release)

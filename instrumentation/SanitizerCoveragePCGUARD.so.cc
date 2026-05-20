@@ -155,7 +155,6 @@ class ModuleSanitizerCoverageAFL
                                                 Type *Ty);
 
   // Helper functions for cleaner code
-  bool   isInstructionInteresting(Instruction &IN);
   bool   isAflInterestingCall(Instruction &IN);
   void   initializeVersionSpecificTypes(IRBuilder<> &IRB);
   void   setupEnvironmentVariables();
@@ -200,6 +199,7 @@ class ModuleSanitizerCoverageAFL
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
   bool            deny_exec = false;
+  uint32_t        first = 1;
 
 };
 
@@ -315,12 +315,6 @@ std::pair<Value *, Value *> ModuleSanitizerCoverageAFL::CreateSecStartEnd(
   return std::make_pair(IRB.CreatePointerCast(GEP, PointerType::getUnqual(Ty)),
                         SecEnd);
 #endif
-
-}
-
-bool ModuleSanitizerCoverageAFL::isInstructionInteresting(Instruction &I) {
-
-  return isAflCovInterestingInstruction(I);
 
 }
 
@@ -491,7 +485,14 @@ Value *ModuleSanitizerCoverageAFL::instrumentVectorSelect(
 
   }
 
-  return IRB.CreateSelect(condition, x, y);
+  Value *frozen_cond = IRB.CreateFreeze(condition);
+  if (auto *I = dyn_cast<Instruction>(frozen_cond)) {
+
+    I->setMetadata("afl.skip", MDNode::get(I->getContext(), {}));
+
+  }
+
+  return IRB.CreateSelect(frozen_cond, x, y);
 
 }
 
@@ -505,12 +506,13 @@ void ModuleSanitizerCoverageAFL::updateCoverageForSelect(IRBuilder<> &IRB,
   while (true) {
 
     Value *MapPtrIdx = nullptr;
+    Value *CoverageIndex = nullptr;
 
     if (!vector_cnt) {
 
       LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), result);
       setNoSanitizeMetadata(CurLoc);
-      MapPtrIdx = IRB.CreateGEP(Int8Ty, MapPtr, CurLoc);
+      CoverageIndex = CurLoc;
 
     } else {
 
@@ -518,9 +520,23 @@ void ModuleSanitizerCoverageAFL::updateCoverageForSelect(IRBuilder<> &IRB,
       auto elementptr = IRB.CreateIntToPtr(element, Int32PtrTy);
       auto elementld = IRB.CreateLoad(IRB.getInt32Ty(), elementptr);
       setNoSanitizeMetadata(elementld);
-      MapPtrIdx = IRB.CreateGEP(Int8Ty, MapPtr, elementld);
+      CoverageIndex = elementld;
 
     }
+
+    // Apply IJON state-aware coverage if enabled
+    if (ijon_enabled && AFLIJONState) {
+
+      LoadInst *IJONStateVal = IRB.CreateLoad(Int32Ty, AFLIJONState);
+      setNoSanitizeMetadata(IJONStateVal);
+      Value    *XorResult = IRB.CreateXor(IJONStateVal, CoverageIndex);
+      LoadInst *CovMapSize = IRB.CreateLoad(Int32Ty, AFLCovMapSize);
+      setNoSanitizeMetadata(CovMapSize);
+      CoverageIndex = IRB.CreateURem(XorResult, CovMapSize);
+
+    }
+
+    MapPtrIdx = IRB.CreateGEP(Int8Ty, MapPtr, CoverageIndex);
 
     if (use_threadsafe_counters) {
 
@@ -945,7 +961,6 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
   uint32_t cnt_cov = 0, cnt_sel = 0, cnt_sel_inc = 0, skip_blocks = 0,
            cnt_special = 0;
-  static uint32_t first = 1;
 
   for (auto &BB : F) {
 
@@ -992,7 +1007,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
       }
 
-      bool instrumentInst = isInstructionInteresting(IN);
+      bool instrumentInst = isAflCovInterestingInstruction(IN);
 
       if (instrumentInst) {
 
@@ -1066,6 +1081,14 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
             }
 
+          } else if (t->getTypeID() == llvm::Type::ScalableVectorTyID) {
+
+            // Scalable vectors (SVE/RISC-V V): we OR-reduce to scalar i1
+            // at instrumentation time, so only 2 guard slots needed.
+            block_is_instrumented = true;
+            cnt_sel++;
+            cnt_sel_inc += 2;
+
           } else {
 
             if (!be_quiet) {
@@ -1119,8 +1142,44 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   /* hoistMapPointerLoad inserts a new entry block (preamble).  Never
      instrument that block with code that uses HoistedMapPtr — it would run
      before the load.  AllBlocks was collected earlier so the preamble is
-     already excluded. */
-  if (AFLMapPtr) { HoistedMapPtr = hoistMapPointerLoad(F, AFLMapPtr, PtrTy); }
+     already excluded.
+     IMPORTANT: do NOT hoist for coroutines.  This pass runs before
+     CoroSplitPass.  A hoisted load that is used across suspend points gets
+     spilled into the coroutine frame; in the .destroy path the frame is
+     freed first and the spilled value is then read from freed memory →
+     heap-use-after-free.  For coroutines we emit a fresh per-block load
+     instead (see getEffectiveMapPtr below), which is never live across a
+     suspend point and therefore never spilled. */
+  if (AFLMapPtr) {
+
+    bool isCoro = false;
+    for (auto &BB : F) {
+
+      for (auto &I : BB) {
+
+        if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+
+          auto iid = II->getIntrinsicID();
+          if (iid == Intrinsic::coro_id || iid == Intrinsic::coro_id_retcon ||
+              iid == Intrinsic::coro_id_retcon_once ||
+              iid == Intrinsic::coro_id_async) {
+
+            isCoro = true;
+            break;
+
+          }
+
+        }
+
+      }
+
+      if (isCoro) break;
+
+    }
+
+    if (!isCoro) { HoistedMapPtr = hoistMapPointerLoad(F, AFLMapPtr, PtrTy); }
+
+  }
 
   uint32_t special = 0, local_selects = 0;
 
@@ -1158,7 +1217,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       // printDebugInfo(IN);
 
       // Check if we should instrument this instruction for coverage
-      bool instrumentInst = isInstructionInteresting(IN);
+      bool instrumentInst = isAflCovInterestingInstruction(IN);
 
       if (instrumentInst) {
 
@@ -1178,7 +1237,15 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
           if (debug) printDebugInfo(IN);
 
-          auto   res = icmp;
+          /* "freeze" prevents the optimizer from deducing that the icmp
+             operands are non-poison merely because this select loads from
+             the selected guard pointer (which would be UB if the condition
+             were poison).  Without freeze, the optimizer can incorrectly
+             eliminate null checks (e.g. the empty-range guard in
+             std::reverse) that protect against inbounds-GEP UB.
+             Who would have thought we need this ... */
+          Value *res = IRB.CreateFreeze(icmp);
+          setNoInstrumentMetadata(res);
           Value *GuardPtr1 =
               createGuardPointer(IRB, cnt_cov + special + local_selects++ +
                                           AllBlocks.size() - skip_blocks);
@@ -1195,7 +1262,8 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
           if (debug) printDebugInfo(IN);
 
-          auto   res = fcmp;
+          Value *res = IRB.CreateFreeze(fcmp);
+          setNoInstrumentMetadata(res);
           Value *GuardPtr1 =
               createGuardPointer(IRB, cnt_cov + special + local_selects++ +
                                           AllBlocks.size() - skip_blocks);
@@ -1210,10 +1278,12 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
           if (debug) printDebugInfo(IN);
 
-          Value      *pair = cxchg;
-          IRBuilder<> IRB(cxchg->getNextNode());
-          Value      *res = IRB.CreateExtractValue(pair, 1);
-          Value      *GuardPtr1 =
+          Value *pair = cxchg;
+          IRB.SetInsertPoint(cxchg->getNextNode());
+          Value *extracted = IRB.CreateExtractValue(pair, 1);
+          Value *res = IRB.CreateFreeze(extracted);
+          setNoInstrumentMetadata(res);
+          Value *GuardPtr1 =
               createGuardPointer(IRB, cnt_cov + special + local_selects++ +
                                           AllBlocks.size() - skip_blocks);
           Value *GuardPtr2 =
@@ -1230,8 +1300,8 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
               Op != AtomicRMWInst::UMin && Op != AtomicRMWInst::UMax)
             continue;
 
-          IRBuilder<> IRB(rmw->getNextNode());
-          Value      *OldVal = rmw;  // result of atomicrmw: old value
+          IRB.SetInsertPoint(rmw->getNextNode());
+          Value *OldVal = rmw;  // result of atomicrmw: old value
           Value *NewVal = rmw->getValOperand();  // value passed to atomicrmw
 
           if (OldVal->getType() != NewVal->getType()) {
@@ -1272,7 +1342,9 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
           }
 
-          Value *res = IRB.CreateICmp(Pred, NewVal, OldVal, "rmw.cov");
+          Value *cmp = IRB.CreateICmp(Pred, NewVal, OldVal, "rmw.cov");
+          Value *res = IRB.CreateFreeze(cmp);
+          setNoInstrumentMetadata(res);
           Value *GuardPtr1 =
               createGuardPointer(IRB, cnt_cov + special + local_selects++ +
                                           AllBlocks.size() - skip_blocks);
@@ -1290,13 +1362,15 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
           if (t->getTypeID() == llvm::Type::IntegerTyID) {
 
+            Value *frozen_cond = IRB.CreateFreeze(condition);
+            setNoInstrumentMetadata(frozen_cond);
             Value *GuardPtr1 =
                 createGuardPointer(IRB, cnt_cov + special + local_selects++ +
                                             AllBlocks.size() - skip_blocks);
             Value *GuardPtr2 =
                 createGuardPointer(IRB, cnt_cov + special + local_selects++ +
                                             AllBlocks.size() - skip_blocks);
-            result = IRB.CreateSelect(condition, GuardPtr1, GuardPtr2);
+            result = IRB.CreateSelect(frozen_cond, GuardPtr1, GuardPtr2);
             setNoInstrumentMetadata(result);
 
           } else
@@ -1316,7 +1390,25 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
           } else
 
-          {
+              if (t->getTypeID() == llvm::Type::ScalableVectorTyID) {
+
+            // Scalable vectors (SVE/RISC-V V): OR-reduce to scalar i1
+            // since we cannot create a compile-time-fixed number of guard
+            // pointers for a runtime-variable vector length.
+            Value *frozen_cond = IRB.CreateFreeze(condition);
+            setNoInstrumentMetadata(frozen_cond);
+            Value *reduced = IRB.CreateOrReduce(frozen_cond);
+            setNoInstrumentMetadata(reduced);
+            Value *GuardPtr1 =
+                createGuardPointer(IRB, cnt_cov + special + local_selects++ +
+                                            AllBlocks.size() - skip_blocks);
+            Value *GuardPtr2 =
+                createGuardPointer(IRB, cnt_cov + special + local_selects++ +
+                                            AllBlocks.size() - skip_blocks);
+            result = IRB.CreateSelect(reduced, GuardPtr1, GuardPtr2);
+            setNoInstrumentMetadata(result);
+
+          } else {
 
             if (!be_quiet) {
 
@@ -1331,7 +1423,16 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
         }
 
-        updateCoverageForSelect(IRB, result, HoistedMapPtr, vector_cnt);
+        Value *EffMapPtr = HoistedMapPtr;
+        if (!EffMapPtr) {
+
+          auto *L = IRB.CreateLoad(PtrTy, AFLMapPtr);
+          setNoSanitizeMetadata(L);
+          EffMapPtr = L;
+
+        }
+
+        updateCoverageForSelect(IRB, result, EffMapPtr, vector_cnt);
         instr += vector_cnt;
 
       }
@@ -1343,8 +1444,6 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   if (AllBlocks.empty() && !special && !local_selects) return false;
 
   uint32_t skipped = 0;
-
-  if (AllBlocks.size() < skipped) { abort(); }  // assert
 
   if (!AllBlocks.empty()) {
 
@@ -1366,6 +1465,8 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
     }
 
   }
+
+  if (AllBlocks.size() < skipped) { abort(); }  // assert
 
   skippedbb += skipped;
 
@@ -1434,7 +1535,16 @@ void ModuleSanitizerCoverageAFL::InjectCoverageAtBlock(Function   &F,
 
     }
 
-    updateCoverageBitmap(IRB, CoverageIndex, HoistedMapPtr);
+    Value *EffMapPtr = HoistedMapPtr;
+    if (!EffMapPtr) {
+
+      auto *L = IRB.CreateLoad(PtrTy, AFLMapPtr);
+      setNoSanitizeMetadata(L);
+      EffMapPtr = L;
+
+    }
+
+    updateCoverageBitmap(IRB, CoverageIndex, EffMapPtr);
 
     // done :)
 

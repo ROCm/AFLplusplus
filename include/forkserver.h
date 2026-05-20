@@ -12,7 +12,7 @@
                      Dominik Maier <mail@dmnk.co>>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -147,6 +147,13 @@ typedef struct afl_forkserver {
   bool use_shmem_fuzz;                  /* use shared mem for test cases    */
 
   bool support_shmem_fuzz;              /* set by afl-fuzz                  */
+
+  bool use_futex;                       /* usage of futex implementation    */
+  u32 *child_sync;                      /* shared word: fuzzer↔child sync   */
+  int  child_sync_shm_id;               /* SysV SHM ID / FD for child_sync  */
+#ifdef USEMMAP
+  char child_sync_shm_file_path[32];    /* Path for shm_open child_sync     */
+#endif
 
   bool use_ijon;                        /* use IJON tracking feature        */
 

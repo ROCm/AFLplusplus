@@ -3,6 +3,7 @@ AFL_TEST_DEPTH=$((AFL_TEST_DEPTH-1))
 
 if [ $AFL_TEST_DEPTH = 0 ]; then
 # All runs done :)
+rm -f .afl-showmap*
 
 $ECHO "$GREY[*] $AFL_TEST_COUNT test cases completed.$RESET"
 test "$INCOMPLETE" = "0" && $ECHO "$GREEN[+] all test cases executed"

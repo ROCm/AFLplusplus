@@ -741,23 +741,22 @@ static u32 from_base64(u8 *src, u8 *dst, u32 dst_len) {
 
 }
 
-static u32 to_base64(u8 *src, u8 *dst, u32 dst_len) {
+static u32 to_base64(u8 *src, u8 *dst, u32 src_len) {
 
   u32 i, j, v;
-  //  u32 len = (dst_len >> 2) * 3;
-  u32 len = (dst_len / 3) * 4;
-  if (dst_len % 3) len += 4;
+  u32 len = (src_len / 3) * 4;
+  if (src_len % 3) len += 4;
 
   for (i = 0, j = 0; j < len; i += 3, j += 4) {
 
     v = src[i];
-    v = i + 1 < len ? v << 8 | src[i + 1] : v << 8;
-    v = i + 2 < len ? v << 8 | src[i + 2] : v << 8;
+    v = i + 1 < src_len ? v << 8 | src[i + 1] : v << 8;
+    v = i + 2 < src_len ? v << 8 | src[i + 2] : v << 8;
 
     dst[j] = base64_encode_table[(v >> 18) & 0x3F];
     dst[j + 1] = base64_encode_table[(v >> 12) & 0x3F];
 
-    if (i + 1 < dst_len) {
+    if (i + 1 < src_len) {
 
       dst[j + 2] = base64_encode_table[(v >> 6) & 0x3F];
 
@@ -767,7 +766,7 @@ static u32 to_base64(u8 *src, u8 *dst, u32 dst_len) {
 
     }
 
-    if (i + 2 < dst_len) {
+    if (i + 2 < src_len) {
 
       dst[j + 3] = base64_encode_table[v & 0x3F];
 
@@ -2136,11 +2135,11 @@ static u8 cmp_fuzz(afl_state_t *afl, u32 key, u8 *orig_buf, u8 *buf, u8 *cbuf,
 
           if (!found_one ||
               check_if_text_buf((u8 *)&s128_v0, SHAPE_BYTES(h->shape)) ==
-                  SHAPE_BYTES(h->shape))
+                  (u32)SHAPE_BYTES(h->shape))
             try_to_add_to_dictN(afl, s128_v0, SHAPE_BYTES(h->shape));
           if (!found_one ||
               check_if_text_buf((u8 *)&s128_v1, SHAPE_BYTES(h->shape)) ==
-                  SHAPE_BYTES(h->shape))
+                  (u32)SHAPE_BYTES(h->shape))
             try_to_add_to_dictN(afl, s128_v1, SHAPE_BYTES(h->shape));
 
         } else
@@ -2151,12 +2150,12 @@ static u8 cmp_fuzz(afl_state_t *afl, u32 key, u8 *orig_buf, u8 *buf, u8 *cbuf,
           if (!memcmp((u8 *)&o->v0, (u8 *)&orig_o->v0, SHAPE_BYTES(h->shape)) &&
               (!found_one ||
                check_if_text_buf((u8 *)&o->v0, SHAPE_BYTES(h->shape)) ==
-                   SHAPE_BYTES(h->shape)))
+                   (u32)SHAPE_BYTES(h->shape)))
             try_to_add_to_dict(afl, o->v0, SHAPE_BYTES(h->shape));
           if (!memcmp((u8 *)&o->v1, (u8 *)&orig_o->v1, SHAPE_BYTES(h->shape)) &&
               (!found_one ||
                check_if_text_buf((u8 *)&o->v1, SHAPE_BYTES(h->shape)) ==
-                   SHAPE_BYTES(h->shape)))
+                   (u32)SHAPE_BYTES(h->shape)))
             try_to_add_to_dict(afl, o->v1, SHAPE_BYTES(h->shape));
 
         }

@@ -5,7 +5,7 @@
    Written by Michal Zalewski, Laszlo Szekeres and Marc Heuse
 
    Copyright 2015, 2016 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -2032,12 +2032,6 @@ void add_sanitizers(aflcc_state_t *aflcc, char **envp) {
     if (getenv("AFL_HARDEN"))
       FATAL("ASAN and AFL_HARDEN are mutually exclusive");
 
-    if (aflcc->compiler_mode == GCC_PLUGIN && !aflcc->have_staticasan) {
-
-      insert_param(aflcc, "-static-libasan");
-
-    }
-
     add_defs_fortify(aflcc, 0);
     if (!aflcc->have_asan) {
 
@@ -2473,7 +2467,14 @@ void add_lto_linker(aflcc_state_t *aflcc) {
 
     }
 
+    /* On macOS the Mach-O lld backend is named ld64.lld; ld.lld is ELF only
+       and rejects the Mach-O flags clang emits (-arch, -platform_version,
+       -syslibroot, ...). */
+#ifdef __APPLE__
+    ld_path = strdup("ld64.lld");
+#else
     ld_path = strdup("ld.lld");
+#endif
 
   }
 
@@ -2593,6 +2594,12 @@ void add_runtime(aflcc_state_t *aflcc) {
       insert_param(aflcc, "-Wl,___sanitizer_cov_trace_pc_guard_init");
 
     }
+
+    /* afl-compiler-rt.o weakly references __asan_region_is_poisoned; on
+       Mach-O the linker still requires resolution unless explicitly told
+       the symbol may be missing at runtime. */
+    insert_param(aflcc, "-Wl,-U");
+    insert_param(aflcc, "-Wl,___asan_region_is_poisoned");
 
   #endif
 
@@ -3612,16 +3619,17 @@ static u8 file_contains_ijon_usage(const char *source_file) {
     // Look for IJON patterns
     if (strstr(line, "#ifdef _USE_IJON") ||
         strstr(line, "#if defined(_USE_IJON)") || strstr(line, "ijon_max(") ||
-        strstr(line, "ijon_min(") || strstr(line, "ijon_set(") ||
-        strstr(line, "ijon_inc(") || strstr(line, "ijon_xor_state(") ||
-        strstr(line, "ijon_reset_state(") || strstr(line, "IJON_MAX(") ||
-        strstr(line, "IJON_MIN(") || strstr(line, "IJON_SET(") ||
-        strstr(line, "IJON_INC(") || strstr(line, "IJON_STATE(") ||
-        strstr(line, "IJON_CTX(") || strstr(line, "IJON_MAX_AT(") ||
-        strstr(line, "IJON_MIN_AT(") || strstr(line, "IJON_BITS(") ||
-        strstr(line, "IJON_STRDIST(") || strstr(line, "IJON_DIST(") ||
-        strstr(line, "IJON_CMP(") || strstr(line, "IJON_STACK_MAX(") ||
-        strstr(line, "IJON_STACK_MIN(")) {
+        strstr(line, "ijon_max_until(") || strstr(line, "ijon_min(") ||
+        strstr(line, "ijon_set(") || strstr(line, "ijon_inc(") ||
+        strstr(line, "ijon_xor_state(") || strstr(line, "ijon_reset_state(") ||
+        strstr(line, "IJON_MAX(") || strstr(line, "IJON_MAX_UNTIL(") ||
+        strstr(line, "IJON_MAX_UNTIL_AT(") || strstr(line, "IJON_MIN(") ||
+        strstr(line, "IJON_SET(") || strstr(line, "IJON_INC(") ||
+        strstr(line, "IJON_STATE(") || strstr(line, "IJON_CTX(") ||
+        strstr(line, "IJON_MAX_AT(") || strstr(line, "IJON_MIN_AT(") ||
+        strstr(line, "IJON_BITS(") || strstr(line, "IJON_STRDIST(") ||
+        strstr(line, "IJON_DIST(") || strstr(line, "IJON_CMP(") ||
+        strstr(line, "IJON_STACK_MAX(") || strstr(line, "IJON_STACK_MIN(")) {
 
       found_ijon = 1;
       break;

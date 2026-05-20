@@ -11,7 +11,6 @@ test -e ../afl-gcc-fast -a -e ../afl-compiler-rt.o && {
   AFL_HARDEN=1 ../afl-gcc-fast -o test-compcov.harden.gccpi test-compcov.c > /dev/null 2>&1
   test -e test-instr.plain.gccpi && {
     chmod +x test-instr.plain.gccpi
-    ls -l test-instr.plain.gccpi
     $ECHO "$GREEN[+] gcc_plugin compilation succeeded"
     echo 0 | AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.plain.0 -r -- ./test-instr.plain.gccpi > /dev/null 2>&1
     AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.plain.1 -r -- ./test-instr.plain.gccpi < /dev/null > /dev/null 2>&1
@@ -115,7 +114,7 @@ test -e ../afl-gcc-fast -a -e ../afl-compiler-rt.o && {
   # GCC 13+ requires returns_twice calls to be first in their basic block.
   # Compile with -fchecking to verify the CFG is valid.
   $ECHO "$GREY[*] testing setjmp/returns_twice instrumentation (issue #2541)"
-  ../afl-gcc-fast -fchecking -fdump-tree-afl -o test-setjmp ./test-setjmp.c > test-setjmp.log 2>&1
+  ../afl-gcc-fast -fchecking -o test-setjmp ./test-setjmp.c > test-setjmp.log 2>&1
   test -e test-setjmp && {
     # Run the binary and capture output for debugging
     SETJMP_OUTPUT=$(./test-setjmp 2>&1)

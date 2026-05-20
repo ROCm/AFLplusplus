@@ -27,7 +27,7 @@ for script in test-*.sh; do
     # Restore directory in case the sourced script changed it
     cd "$TEST_DIR"
   else
-    echo "Running $script independently..."
+    echo "$GREY[*] Running $script independently..."
     . ./test-pre.sh
     if [ -x "./$script" ]; then
       "./$script"
@@ -49,3 +49,4 @@ done
 CODE=$ALL_CODE
 
 . ./test-post.sh
+echo done

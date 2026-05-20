@@ -12,7 +12,7 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -518,9 +518,11 @@ static ssize_t read_all(int fd, void *buf, size_t n) {
    - Output: [u16 status][u32 edge_count][{u32 edge_idx, u8 hit_ctr}*]
              [u32 stdout_len][u8 stdout_data*][u32 stderr_len][u8 stderr_data*]
    Status field:
-     bits 0-1:  exit status (0=exited, 1=timeout, 2=crash)
-     bits 2-7:  reserved (must be 0)
-     bits 8-15: signal number (only valid when status=crash)
+     bits [0:1]:  exit status (0=exited, 1=timeout, 2=crash)
+     bits [2:7]:  reserved (must be 0)
+     bits [8:15]: WEXITSTATUS when bits [0:1] = 0 (normal exit),
+                  0 when bits [0:1] = 1 (timeout),
+                  WTERMSIG when bits [0:1] = 2 (crash)
    Note: stdout_len and stderr_len are currently always 0 (not implemented).
          These fields are reserved for future use to capture target output.
 */
@@ -560,7 +562,8 @@ static void streaming_loop(void) {
 
     } else {
 
-      status = STREAMING_STATUS_EXITED;
+      /* Encode exit code in bits 8-15 */
+      status = STREAMING_STATUS_EXITED | (WEXITSTATUS(fsrv->child_status) << 8);
 
     }
 
@@ -1191,8 +1194,9 @@ static void usage(u8 *argv0) {
       "                         Output [u16 status][u32 edges][(u32,u8)*]\n"
       "                                [u32 stdout_len][stdout_data*]\n"
       "                                [u32 stderr_len][stderr_data*]\n"
-      "               Status: bits 0-1 = exit (0=ok, 1=timeout, 2=crash),\n"
-      "                       bits 2-7 = reserved (0), bits 8-15 = signal\n"
+      "               Status: bits [0:1] = exit (0=ok, 1=timeout, 2=crash),\n"
+      "                       bits [2:7] = reserved (0),\n"
+      "                       bits [8:15] = exit code (ok) or signal (crash)\n"
       "               Note: stdout_len/stderr_len are currently always 0\n"
       "                     (output capture not yet implemented)\n"
       "  -i dir     - process all files below this directory, must be combined "
@@ -1634,6 +1638,14 @@ int main(int argc, char **argv_orig, char **envp) {
     fsrv->out_fd =
         open(stdin_file, O_RDWR | O_CREAT | O_EXCL, DEFAULT_PERMISSION);
     if (fsrv->out_fd < 0) { PFATAL("Unable to create '%s'", stdin_file); }
+
+    /* If we created the temp file ourselves and the target reads from stdin
+       (no @@ substitution), unlink the directory entry now. The open fd keeps
+       the file alive for writes, but SIGKILL / SIGSEGV / parent process kill
+       can no longer leave a stray .afl-showmap-temp-<pid> behind. With @@ the
+       path is baked into argv and must stay visible to the child, so we leave
+       it for the atexit / signal handler to clean up. */
+    if (!at_file && fsrv->use_stdin) { unlink(stdin_file); }
 
   } else {
 

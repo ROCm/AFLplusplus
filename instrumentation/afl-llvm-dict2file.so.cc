@@ -4,7 +4,7 @@
 
    Written by Marc Heuse <mh@mh-sec.de>
 
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -408,38 +408,62 @@ PreservedAnalyses AFLdict2filePass::run(Module &M, ModuleAnalysisManager &MAM) {
            * prototype */
           FunctionType *FT = Callee->getFunctionType();
 
-          isStrstr &=
-              FT->getNumParams() == 2 &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
-          isStrcmp &=
-              FT->getNumParams() == 2 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
-          isStrcasecmp &=
-              FT->getNumParams() == 2 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
+          isStrstr &= FT->getNumParams() == 2 &&
+                      FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                      FT->getParamType(0)->isPointerTy();
+#else
+                      FT->getParamType(0) ==
+                          IntegerType::getInt8Ty(M.getContext())
+                              ->getPointerTo(0);
+#endif
+          isStrcmp &= FT->getNumParams() == 2 &&
+                      FT->getReturnType()->isIntegerTy(32) &&
+                      FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                      FT->getParamType(0)->isPointerTy();
+#else
+                      FT->getParamType(0) ==
+                          IntegerType::getInt8Ty(M.getContext())
+                              ->getPointerTo(0);
+#endif
+          isStrcasecmp &= FT->getNumParams() == 2 &&
+                          FT->getReturnType()->isIntegerTy(32) &&
+                          FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                          FT->getParamType(0)->isPointerTy();
+#else
+                          FT->getParamType(0) ==
+                              IntegerType::getInt8Ty(M.getContext())
+                                  ->getPointerTo(0);
+#endif
           isMemcmp &= FT->getNumParams() == 3 &&
                       FT->getReturnType()->isIntegerTy(32) &&
                       FT->getParamType(0)->isPointerTy() &&
                       FT->getParamType(1)->isPointerTy() &&
                       FT->getParamType(2)->isIntegerTy();
-          isStrncmp &=
-              FT->getNumParams() == 3 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0) &&
-              FT->getParamType(2)->isIntegerTy();
-          isStrncasecmp &=
-              FT->getNumParams() == 3 && FT->getReturnType()->isIntegerTy(32) &&
-              FT->getParamType(0) == FT->getParamType(1) &&
-              FT->getParamType(0) ==
-                  IntegerType::getInt8Ty(M.getContext())->getPointerTo(0) &&
-              FT->getParamType(2)->isIntegerTy();
+          isStrncmp &= FT->getNumParams() == 3 &&
+                       FT->getReturnType()->isIntegerTy(32) &&
+                       FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                       FT->getParamType(0)->isPointerTy() &&
+#else
+                       FT->getParamType(0) ==
+                           IntegerType::getInt8Ty(M.getContext())
+                               ->getPointerTo(0) &&
+#endif
+                       FT->getParamType(2)->isIntegerTy();
+          isStrncasecmp &= FT->getNumParams() == 3 &&
+                           FT->getReturnType()->isIntegerTy(32) &&
+                           FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                           FT->getParamType(0)->isPointerTy() &&
+#else
+                           FT->getParamType(0) ==
+                               IntegerType::getInt8Ty(M.getContext())
+                                   ->getPointerTo(0) &&
+#endif
+                           FT->getParamType(2)->isIntegerTy();
           isStdString &= FT->getNumParams() >= 2 &&
                          FT->getParamType(0)->isPointerTy() &&
                          FT->getParamType(1)->isPointerTy();

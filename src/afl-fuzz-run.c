@@ -10,7 +10,7 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -108,61 +108,11 @@ fsrv_run_result_t __attribute__((hot)) fuzz_run_target(afl_state_t      *afl,
 
     /* UNIFIED SHARED MEMORY ACCESS: Always use dynamic allocation */
 
-    // Get current input data for IJON processing
-    u8 *input_data = NULL;
-    u32 input_len = 0;
-
-    /* Read input data from testcase file that was just executed */
-    if (afl->fsrv.out_file) {
-
-      struct stat st;
-      if (stat(afl->fsrv.out_file, &st) == 0) {
-
-        if (st.st_size > 0) {
-
-          input_len = st.st_size;
-          input_data = ck_alloc(input_len);
-
-          int fd = open(afl->fsrv.out_file, O_RDONLY);
-          if (fd >= 0) {
-
-            ssize_t bytes_read = read(fd, input_data, input_len);
-            close(fd);
-
-            if (bytes_read != input_len) {
-
-              ck_free(input_data);
-              input_data = NULL;
-              input_len = 0;
-
-            }
-
-          } else {
-
-            ck_free(input_data);
-            input_data = NULL;
-            input_len = 0;
-
-          }
-
-        }
-
-      }
-
-    }
-
-    if (input_data) {
+    if (likely(afl->ijon_cur_input && afl->ijon_cur_input_len)) {
 
       /* Use pre-initialized shared_access from afl state */
       ijon_update_max_dynamic(afl->ijon_state, afl->ijon_shared_access,
-                              input_data, input_len);
-
-    }
-
-    if (input_data) {
-
-      ck_free(input_data);
-      input_data = NULL;
+                              afl->ijon_cur_input, afl->ijon_cur_input_len);
 
     }
 
@@ -317,6 +267,13 @@ u32 __attribute__((hot)) write_to_testcase(afl_state_t *afl, void **mem,
 
   }
 
+  if (unlikely(afl->ijon_bits)) {
+
+    afl->ijon_cur_input = *mem;
+    afl->ijon_cur_input_len = len;
+
+  }
+
 #ifdef _AFL_DOCUMENT_MUTATIONS
   s32  doc_fd;
   char fn[PATH_MAX];
@@ -429,7 +386,6 @@ static void write_with_gap(afl_state_t *afl, u8 *mem, u32 len, u32 skip_at,
     } else {
 
       memcpy(afl->fsrv.shmem_fuzz, mem, skip_at);
-
       memcpy(afl->fsrv.shmem_fuzz + skip_at, mem + skip_at + skip_len,
              tail_len);
 
@@ -492,7 +448,6 @@ static void write_with_gap(afl_state_t *afl, u8 *mem, u32 len, u32 skip_at,
   } else {
 
     ck_write(fd, mem, skip_at, afl->fsrv.out_file);
-
     ck_write(fd, mem + skip_at + skip_len, tail_len, afl->fsrv.out_file);
 
   }
@@ -773,6 +728,8 @@ abort_calibration:
 
     if (!q->var_behavior) { ++afl->queued_variable; }
 
+    mark_as_variable(afl, q);
+
   }
 
   afl->stage_name = old_sn;
@@ -905,7 +862,7 @@ void check_sync_fuzzers(afl_state_t *afl) {
 
     afl->is_main_node = 1;
     sprintf(qd_path, "%s/is_main_node", afl->out_dir);
-    int id_fd = open(qd_main_path, O_RDWR | O_CREAT, afl->perm);
+    int id_fd = open(qd_path, O_RDWR | O_CREAT, afl->perm);
     if (id_fd >= 0) { close(id_fd); }
 
   }
@@ -1415,8 +1372,19 @@ u8 trim_case(afl_state_t *afl, struct queue_entry *q, u8 *in_buf) {
       u32 written = 0;
       while (written < q->len) {
 
-        ssize_t result = write(fd, in_buf, q->len - written);
-        if (result > 0) written += result;
+        ssize_t result = write(fd, in_buf + written, q->len - written);
+        if (likely(result > 0)) {
+
+          written += result;
+          continue;
+
+        }
+
+        if (!result) { FATAL("Short write to '%s'", q->fname); }
+
+        if (errno == EINTR) { continue; }
+
+        PFATAL("Unable to write '%s'", q->fname);
 
       }
 

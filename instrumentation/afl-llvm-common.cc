@@ -53,7 +53,23 @@ unsigned int calcCyclomaticComplexity(llvm::Function *F) {
     for (Instruction &I : BB) {
 
       // every call is also an edge, so we need to count the calls too
-      if (isa<CallInst>(&I) || isa<InvokeInst>(&I)) { numCalls++; }
+      if (isa<CallInst>(&I) || isa<InvokeInst>(&I)) {
+
+        // Do not count llvm.* intrinsics (dbg, lifetime, etc.) as edges —
+        // they are not real control-flow transfers.
+        if (auto *CB = dyn_cast<CallBase>(&I)) {
+
+          if (Function *Callee = CB->getCalledFunction()) {
+
+            if (Callee->isIntrinsic()) continue;
+
+          }
+
+        }
+
+        numCalls++;
+
+      }
 
     }
 
@@ -64,16 +80,14 @@ unsigned int calcCyclomaticComplexity(llvm::Function *F) {
   // Calls are considered to be an edge
   unsigned int CC = 2 + numCalls + numEdges - numBlocks;
 
-  // if (debug) {
-
   fprintf(stderr, "CyclomaticComplexity for %s: %u\n",
           F->getName().str().c_str(), CC);
-
-  //}
 
   return CC;
 
 }
+
+/* Note that the caller needs to free returned value! Currently unused. */
 
 char *getBBName(const llvm::BasicBlock *BB) {
 
@@ -104,34 +118,13 @@ bool isIgnoreFunction(const llvm::Function *F) {
 
   static constexpr const char *ignoreList[] = {
 
-      "asan.",
-      "llvm.",
-      "sancov.",
-      "__ubsan",
-      "ign.",
-      "__afl",
-      "_fini",
-      "__libc_",
-      "__asan",
-      "__msan",
-      "__cmplog",
-      "__sancov",
-      "__san",
-      "__cxx_",
-      "__decide_deferred",
-      "_GLOBAL",
-      "_ZZN6__asan",
-      "_ZZN6__lsan",
-      "msan.",
-      "LLVMFuzzerM",
-      "LLVMFuzzerC",
-      "LLVMFuzzerI",
-      "maybe_duplicate_stderr",
-      "discard_output",
-      "close_stdout",
-      "dup_and_close_stderr",
-      "maybe_close_fd_mask",
-      "ExecuteFilesOnyByOne"
+      "asan.", "llvm.", "sancov.", "__ubsan", "ign.", "__afl", "_fini",
+      "__libc_", "__asan", "__msan", "__cmplog", "__sancov", "__san", "__lsan",
+      "__cxx_", "__decide_deferred", "_GLOBAL", "_ZZN6__asan", "_ZZN6__lsan",
+      "msan.", "LLVMFuzzerM", "LLVMFuzzerC", "LLVMFuzzerI",
+      // LLVMFuzzerT(estOneInput is not in this list on purpose!
+      "maybe_duplicate_stderr", "discard_output", "close_stdout",
+      "dup_and_close_stderr", "maybe_close_fd_mask", "ExecuteFilesOnyByOne"
 
   };
 
@@ -772,11 +765,19 @@ bool isExecCall(llvm::Instruction *IN) {
   if (!Callee || !Callee->hasName() || Callee->isIntrinsic()) return false;
 
   return llvm::StringSwitch<bool>(Callee->getName())
+#if LLVM_VERSION_MAJOR >= 22
+      .Cases({"execve", "execl", "execlp", "execle"}, true)
+      .Cases({"execv", "execvp", "execvP", "execvpe"}, true)
+      .Cases({"fexecve", "execveat"}, true)
+      .Cases({"posix_spawn", "posix_spawnp"}, true)
+      .Cases({"system", "popen"}, true)
+#else
       .Cases("execve", "execl", "execlp", "execle", true)
       .Cases("execv", "execvp", "execvP", "execvpe", true)
       .Cases("fexecve", "execveat", true)
       .Cases("posix_spawn", "posix_spawnp", true)
       .Cases("system", "popen", true)
+#endif
       .Default(false);
 
 }
@@ -826,8 +827,8 @@ std::pair<bool, bool> detectIJONUsage(Module &M) {
 
         // Check for other IJON functions (max/min/set/inc)
         if (funcName == "ijon_max" || funcName == "ijon_min" ||
-            funcName == "ijon_set" || funcName == "ijon_inc" ||
-            funcName == "ijon_max_variadic" ||
+            funcName == "ijon_max_until" || funcName == "ijon_set" ||
+            funcName == "ijon_inc" || funcName == "ijon_max_variadic" ||
             funcName == "ijon_min_variadic") {
 
           uses_ijon_functions = true;

@@ -1,12 +1,12 @@
 #!/bin/sh
 
 TEST_DIR=$(pwd)
-. ./test-pre.sh
+#. ./t-----est-pre.sh
 
 #$ECHO "$BLUE[*] Testing: nautilus mutator"
 
 #temp block
-$ECHO "$BLUE[*] Testing: nautilus mutator $RED DISABLED$WHITE"
+echo -e "$BLUE[*] Testing: nautilus mutator$RED DISABLED$WHITE"
 . ./test-post.sh
 exit 0
 

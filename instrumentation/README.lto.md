@@ -32,7 +32,7 @@ the real collisions are between 750-18.000!
 
 Note that PCGUARD (our own modified implementation and the SANCOV PCGUARD
 implementation from libfuzzer) also provides collision free coverage.
-It is a bit slower though and can a few targets with very early constructors.
+It is slightly slower and can cause issues with targets with very early constructors.
 
 * We instrument at link time when we have all files pre-compiled.
 * To instrument at link time, we compile in LTO (link time optimization) mode.

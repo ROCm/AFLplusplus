@@ -12,7 +12,7 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2026 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -26,6 +26,10 @@
 
 #define AFL_MAIN
 #define AFL_CMIN
+
+#ifndef _GNU_SOURCE
+  #define _GNU_SOURCE
+#endif
 
 #include <ctype.h>
 #include <dirent.h>
@@ -164,7 +168,11 @@ static u32 get_nyx_map_size(u8 *target_path) {
 
   void *nyx_config = nyx_handlers->nyx_config_load(target_path);
 
-  char *workdir_path = create_nyx_tmp_workdir();
+  /* Mirror afl_fsrv_start()'s nyx setup: libnyx must write its files under
+     <outer>/workdir/, otherwise remove_nyx_tmp_workdir() can't clean up and
+     the next create_nyx_tmp_workdir() (same PID) fails with EEXIST. */
+  char *outdir_path = create_nyx_tmp_workdir();
+  char *workdir_path = alloc_printf("%s/workdir", outdir_path);
   nyx_handlers->nyx_config_set_workdir_path(nyx_config, workdir_path);
   nyx_handlers->nyx_config_set_process_role(nyx_config, StandAlone);
 
@@ -179,7 +187,8 @@ static u32 get_nyx_map_size(u8 *target_path) {
 
   afl_forkserver_t fsrv = {0};
   fsrv.nyx_handlers = nyx_handlers;
-  remove_nyx_tmp_workdir(&fsrv, workdir_path);
+  ck_free(workdir_path);
+  remove_nyx_tmp_workdir(&fsrv, outdir_path);
 
   return size;
 
@@ -882,6 +891,16 @@ static char **prepare_fsrv(afl_forkserver_t *fsrv, sharedmem_t *shm,
   // Init fsrv
   afl_fsrv_init(fsrv);
   set_sanitizer_defaults();
+
+  /* Set binary-only mode flags before afl_fsrv_setup_preload() so the
+     correct LD_PRELOAD (e.g. afl-frida-trace.so) is injected. */
+  fsrv->frida_mode = frida_mode;
+  fsrv->qemu_mode = qemu_mode;
+  fsrv->unicorn_mode = unicorn_mode;
+#ifdef __linux__
+  fsrv->nyx_mode = nyx_mode;
+#endif
+
   afl_fsrv_setup_preload(fsrv, target_bin);
 
   // Init SHM
@@ -895,9 +914,6 @@ static char **prepare_fsrv(afl_forkserver_t *fsrv, sharedmem_t *shm,
   fsrv->exec_tmout = time_limit;
   if (!fsrv->exec_tmout) fsrv->exec_tmout = 120 * 1000;
 
-  if (frida_mode) fsrv->frida_mode = 1;
-  if (qemu_mode) fsrv->qemu_mode = 1;
-  if (unicorn_mode) fsrv->unicorn_mode = 1;
   if (nyx_mode) {
 
 #ifdef __linux__
@@ -1048,6 +1064,18 @@ static void exec_worker(worker_data_t *data, u32 *shared_cmin_idx) {
 
   afl_fsrv_start(fsrv, argv, &stop_soon, debug_mode);
 
+  /* Post-handshake: if target did not negotiate shmem-fuzz (e.g. Frida
+     non-persistent mode), tear down the allocation and fall back to
+     out_fd/stdin delivery — mirrors afl-showmap.c behaviour. */
+  if (fsrv->support_shmem_fuzz && !fsrv->use_shmem_fuzz) {
+
+    afl_shm_deinit(&shm_fuzz);
+    fsrv->support_shmem_fuzz = 0;
+    fsrv->shmem_fuzz_len = NULL;
+    fsrv->shmem_fuzz = NULL;
+
+  }
+
   u8 *last_exec_dir = NULL;
   int last_exec_dirfd = -1;
 
@@ -1119,7 +1147,7 @@ static void exec_worker(worker_data_t *data, u32 *shared_cmin_idx) {
 
   afl_fsrv_deinit(fsrv);
   afl_shm_deinit(&data->shm);
-  if (fsrv->support_shmem_fuzz) afl_shm_deinit(&shm_fuzz);
+  if (fsrv->use_shmem_fuzz) afl_shm_deinit(&shm_fuzz);
   cleanup_fsrv_allocs(fsrv, argv);
 
 }
@@ -1221,6 +1249,15 @@ static void cmin_detect_map_size(void) {
     // Init fsrv
     afl_fsrv_init(&fsrv);
     set_sanitizer_defaults();
+
+    /* Propagate binary-only mode flags before preload setup. */
+    fsrv.frida_mode = frida_mode;
+    fsrv.qemu_mode = qemu_mode;
+    fsrv.unicorn_mode = unicorn_mode;
+#ifdef __linux__
+    fsrv.nyx_mode = nyx_mode;
+#endif
+
     afl_fsrv_setup_preload(&fsrv, target_bin);
     fsrv.target_path = target_bin;
 
@@ -1814,10 +1851,45 @@ static void test_target_binary(void) {
   afl_forkserver_t fsrv = {0};
   sharedmem_t      shm = {0};
   u8               stop_soon = 0;
+  char           **argv;
 
-  char **argv = prepare_fsrv(&fsrv, &shm, map_size, (u32)-1, NULL);
+#ifdef __linux__
+  if (nyx_mode)
+    argv = prepare_fsrv(&fsrv, &shm, map_size, 0, "%s/.cur_input_%u");
+  else
+#endif
+    argv = prepare_fsrv(&fsrv, &shm, map_size, (u32)-1, NULL);
+
+  /* Set up shared-memory test-case delivery; the fork server negotiates
+     shmem-fuzz support during the handshake (needed for Frida/QEMU). */
+  sharedmem_t shm_fuzz = {0};
+  u8         *fuzz_map =
+      afl_shm_init(&shm_fuzz, MAX_FILE + sizeof(u32), 1, DEFAULT_PERMISSION, 0);
+
+  if (fuzz_map) {
+
+    shm_fuzz.shmemfuzz_mode = 1;
+    fsrv.support_shmem_fuzz = 1;
+    fsrv.shmem_fuzz_len = (u32 *)fuzz_map;
+    fsrv.shmem_fuzz = fuzz_map + sizeof(u32);
+
+    u8 *shm_fuzz_map_size_str = alloc_printf("%lu", MAX_FILE + sizeof(u32));
+    setenv(SHM_FUZZ_MAP_SIZE_ENV_VAR, shm_fuzz_map_size_str, 1);
+    ck_free(shm_fuzz_map_size_str);
+
+  }
 
   afl_fsrv_start(&fsrv, (char **)argv, &stop_soon, debug_mode ? 1 : 0);
+
+  /* Same post-handshake fallback as exec_worker() and afl-showmap. */
+  if (fsrv.support_shmem_fuzz && !fsrv.use_shmem_fuzz) {
+
+    afl_shm_deinit(&shm_fuzz);
+    fsrv.support_shmem_fuzz = 0;
+    fsrv.shmem_fuzz_len = NULL;
+    fsrv.shmem_fuzz = NULL;
+
+  }
 
   // Use the first file for testing
   cmin_file_t      *f = files[0];
@@ -1869,6 +1941,7 @@ static void test_target_binary(void) {
   }
 
   // Cleanup
+  if (fsrv.use_shmem_fuzz) afl_shm_deinit(&shm_fuzz);
   afl_fsrv_deinit(&fsrv);
   afl_shm_deinit(&shm);
 

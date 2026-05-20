@@ -11,7 +11,7 @@ TEMP_DIR=$(mktemp -d)
 cleanup() { rm -rf "$TEMP_DIR"; }
 trap cleanup EXIT
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'; GREY="\\033[1;90m"
 PASS=0; FAIL=0
 
 # Check if afl-clang-fast exists
@@ -23,7 +23,7 @@ fi
 # Check if the compiler supports _BitInt
 echo "int main(){_BitInt(24) x=0;return(int)x;}" > "$TEMP_DIR/check.c"
 if ! AFL_QUIET=1 ./afl-clang-fast -o /dev/null -c "$TEMP_DIR/check.c" 2>/dev/null; then
-    echo "Compiler does not support _BitInt, skipping test"
+    echo -e "$GREY[*] Compiler does not support _BitInt, skipping test"
     exit 0
 fi
 
@@ -44,7 +44,7 @@ EOF
     AFL_LLVM_CMPLOG=1 AFL_QUIET=1 ./afl-clang-fast -S -emit-llvm \
         -o "$TEMP_DIR/test.ll" "$TEMP_DIR/test.c" 2>/dev/null
     if [ $? -ne 0 ]; then
-        printf "%-16s ${RED}FAIL${NC} (compilation failed)\n" "$name"
+        printf "$RED[-] %-16s FAIL$ (compilation failed)\n" "$name"
         ((FAIL++))
         return
     fi
@@ -55,24 +55,22 @@ EOF
         | grep -o '__cmplog_ins_hook[A-Za-z0-9]*')
 
     if [ -z "$hook" ]; then
-        printf "%-16s ${RED}FAIL${NC} (no cmplog hook found)\n" "$name"
+        printf "$RED[-] %-16s FAIL (no cmplog hook found)\n" "$name"
         ((FAIL++))
         return
     fi
 
     if [ "$hook" = "$expected_hook" ]; then
-        printf "%-16s hook=%-24s ${GREEN}PASS${NC}\n" "$name" "$hook"
+        #printf "$GREEN[+] %-16s hook=%-24s PASS\n" "$name" "$hook"
         ((PASS++))
     else
-        printf "%-16s hook=%-24s ${RED}FAIL${NC} (expected %s)\n" \
+        printf "$RED[-] %-16s hook=%-24s FAIL (expected %s)\n" \
             "$name" "$hook" "$expected_hook"
         ((FAIL++))
     fi
 }
 
-echo "Testing cmplog-instructions-pass with non-standard integer sizes..."
-echo "(Regression test for GitHub issue #2704)"
-echo
+echo -e "$GREY[*] Testing cmplog-instructions-pass with non-standard integer sizes..."
 
 # Non-standard sizes <=64: cast to next supported hook width.
 test_bitint "_BitInt(24)" 24 "__cmplog_ins_hook4"
@@ -93,6 +91,5 @@ else
     echo "Skipping >64-bit hook checks on 32-bit host"
 fi
 
-echo ""
-echo "Results: $PASS passed, $FAIL failed"
+echo -e "$GREY[*] Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

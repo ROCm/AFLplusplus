@@ -394,6 +394,8 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
       return false;
   */
   BlockList.clear();
+  for (auto &kv : valueMap)
+    delete kv.second;
   valueMap.clear();
   dictionary.clear();
   GlobalsToAppendToUsed.clear();
@@ -506,9 +508,14 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
   skip_nozero = getenv("AFL_LLVM_SKIP_NEVERZERO");
   use_threadsafe_counters = getenv("AFL_LLVM_THREADSAFE_INST");
 
-  if ((ptr = getenv("AFL_LLVM_LTO_STARTID")) != NULL)
-    if ((afl_global_id = atoi(ptr)) < 0)
+  if ((ptr = getenv("AFL_LLVM_LTO_STARTID")) != NULL) {
+
+    int val = atoi(ptr);
+    if (val < 0)
       FATAL("AFL_LLVM_LTO_STARTID value of \"%s\" is negative\n", ptr);
+    afl_global_id = (uint32_t)val;
+
+  }
 
   if (afl_global_id < 4) { afl_global_id = 4; }
 
@@ -557,9 +564,6 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
 
     AFLMapPtr = new GlobalVariable(
         M, PtrTy, false, GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
-    AFLCovMapSize =
-        new GlobalVariable(M, Int32Tyi, false, GlobalValue::ExternalLinkage, 0,
-                           "__afl_cov_map_size");
 
   } else {
 
@@ -567,6 +571,10 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
     MapPtrFixed = ConstantExpr::getIntToPtr(MapAddr, PtrTy);
 
   }
+
+  AFLCovMapSize =
+      new GlobalVariable(M, Int32Tyi, false, GlobalValue::ExternalLinkage, 0,
+                         "__afl_cov_map_size");
 
   AFLContext = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_ctx", 0,
@@ -624,8 +632,8 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
                   case CmpInst::ICMP_SGT:
 
                     // signed comparison and it is a negative constant
-                    if ((len == 4 && (val & 80000000)) ||
-                        (len == 8 && (val & 8000000000000000))) {
+                    if ((len == 4 && (val & 0x80000000)) ||
+                        (len == 8 && (val & 0x8000000000000000))) {
 
                       if ((val & 0xffff) != 1) val2 = val - 1;
                       break;
@@ -647,8 +655,8 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
                   case CmpInst::ICMP_SGE:
 
                     // signed comparison and it is a negative constant
-                    if ((len == 4 && (val & 80000000)) ||
-                        (len == 8 && (val & 8000000000000000))) {
+                    if ((len == 4 && (val & 0x80000000)) ||
+                        (len == 8 && (val & 0x8000000000000000))) {
 
                       if ((val & 0xffff) != 1) val2 = val - 1;
                       break;
@@ -694,6 +702,8 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
             bool   isStrncasecmp = true;
             bool   isIntMemcpy = true;
             bool   isStdString = true;
+            bool   isStrstr = true;
+            bool   isGStrstrLen = true;
             size_t optLen = 0;
 
             Function *Callee = callInst->getCalledFunction();
@@ -742,6 +752,12 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
                   FuncName.find("compare") != std::string::npos) ||
                  (FuncName.find("basic_string") != std::string::npos &&
                   FuncName.find("find") != std::string::npos));
+            isStrstr &= (!FuncName.compare("strstr") ||
+                         !FuncName.compare("strcasestr") ||
+                         !FuncName.compare("ap_strcasestr") ||
+                         !FuncName.compare("xmlStrstr") ||
+                         !FuncName.compare("xmlStrcasestr"));
+            isGStrstrLen &= !FuncName.compare("g_strstr_len");
 
             /* we do something different here, putting this BB and the
                successors in a block map */
@@ -759,58 +775,90 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
             }
 
             if (!isStrcmp && !isMemcmp && !isStrncmp && !isStrcasecmp &&
-                !isStrncasecmp && !isIntMemcpy && !isStdString)
+                !isStrncasecmp && !isIntMemcpy && !isStdString && !isStrstr &&
+                !isGStrstrLen)
               continue;
 
-            /* Verify the strcmp/memcmp/strncmp/strcasecmp/strncasecmp function
-             * prototype */
+            /* Verify the strcmp/memcmp/strncmp/strcasecmp/strncasecmp/strstr
+             * function prototype */
             FunctionType *FT = Callee->getFunctionType();
 
-            isStrcmp &=
-                FT->getNumParams() == 2 &&
-                FT->getReturnType()->isIntegerTy(32) &&
-                FT->getParamType(0) == FT->getParamType(1) &&
-                FT->getParamType(0) ==
-                    IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
-            isStrcasecmp &=
-                FT->getNumParams() == 2 &&
-                FT->getReturnType()->isIntegerTy(32) &&
-                FT->getParamType(0) == FT->getParamType(1) &&
-                FT->getParamType(0) ==
-                    IntegerType::getInt8Ty(M.getContext())->getPointerTo(0);
+            isStrcmp &= FT->getNumParams() == 2 &&
+                        FT->getReturnType()->isIntegerTy(32) &&
+                        FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                        FT->getParamType(0)->isPointerTy();
+#else
+                        FT->getParamType(0) ==
+                            IntegerType::getInt8Ty(M.getContext())
+                                ->getPointerTo(0);
+#endif
+            isStrcasecmp &= FT->getNumParams() == 2 &&
+                            FT->getReturnType()->isIntegerTy(32) &&
+                            FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                            FT->getParamType(0)->isPointerTy();
+#else
+                            FT->getParamType(0) ==
+                                IntegerType::getInt8Ty(M.getContext())
+                                    ->getPointerTo(0);
+#endif
             isMemcmp &= FT->getNumParams() == 3 &&
                         FT->getReturnType()->isIntegerTy(32) &&
                         FT->getParamType(0)->isPointerTy() &&
                         FT->getParamType(1)->isPointerTy() &&
                         FT->getParamType(2)->isIntegerTy();
-            isStrncmp &=
-                FT->getNumParams() == 3 &&
-                FT->getReturnType()->isIntegerTy(32) &&
-                FT->getParamType(0) == FT->getParamType(1) &&
-                FT->getParamType(0) ==
-                    IntegerType::getInt8Ty(M.getContext())->getPointerTo(0) &&
-                FT->getParamType(2)->isIntegerTy();
-            isStrncasecmp &=
-                FT->getNumParams() == 3 &&
-                FT->getReturnType()->isIntegerTy(32) &&
-                FT->getParamType(0) == FT->getParamType(1) &&
-                FT->getParamType(0) ==
-                    IntegerType::getInt8Ty(M.getContext())->getPointerTo(0) &&
-                FT->getParamType(2)->isIntegerTy();
+            isStrncmp &= FT->getNumParams() == 3 &&
+                         FT->getReturnType()->isIntegerTy(32) &&
+                         FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                         FT->getParamType(0)->isPointerTy() &&
+#else
+                         FT->getParamType(0) ==
+                             IntegerType::getInt8Ty(M.getContext())
+                                 ->getPointerTo(0) &&
+#endif
+                         FT->getParamType(2)->isIntegerTy();
+            isStrncasecmp &= FT->getNumParams() == 3 &&
+                             FT->getReturnType()->isIntegerTy(32) &&
+                             FT->getParamType(0) == FT->getParamType(1) &&
+#if LLVM_MAJOR >= 17
+                             FT->getParamType(0)->isPointerTy() &&
+#else
+                             FT->getParamType(0) ==
+                                 IntegerType::getInt8Ty(M.getContext())
+                                     ->getPointerTo(0) &&
+#endif
+                             FT->getParamType(2)->isIntegerTy();
             isStdString &= FT->getNumParams() >= 2 &&
                            FT->getParamType(0)->isPointerTy() &&
                            FT->getParamType(1)->isPointerTy();
+            isStrstr &= FT->getNumParams() == 2 &&
+                        FT->getReturnType()->isPointerTy() &&
+                        FT->getParamType(0)->isPointerTy() &&
+                        FT->getParamType(1)->isPointerTy();
+            // g_strstr_len: gchar* (const gchar *haystack, gssize haystack_len,
+            //                       const gchar *needle)
+            isGStrstrLen &= FT->getNumParams() == 3 &&
+                            FT->getReturnType()->isPointerTy() &&
+                            FT->getParamType(0)->isPointerTy() &&
+                            FT->getParamType(1)->isIntegerTy() &&
+                            FT->getParamType(2)->isPointerTy();
 
             if (!isStrcmp && !isMemcmp && !isStrncmp && !isStrcasecmp &&
-                !isStrncasecmp && !isIntMemcpy && !isStdString)
+                !isStrncasecmp && !isIntMemcpy && !isStdString && !isStrstr &&
+                !isGStrstrLen)
               continue;
 
-            /* is a str{n,}{case,}cmp/memcmp, check if we have
+            /* is a str{n,}{case,}cmp/memcmp/strstr, check if we have
              * str{case,}cmp(x, "const") or str{case,}cmp("const", x)
              * strn{case,}cmp(x, "const", ..) or strn{case,}cmp("const", x, ..)
-             * memcmp(x, "const", ..) or memcmp("const", x, ..) */
+             * memcmp(x, "const", ..) or memcmp("const", x, ..)
+             * strstr(x, "const") or g_strstr_len(x, len, "const") */
             Value *Str1P = callInst->getArgOperand(0),
-                  *Str2P = callInst->getArgOperand(1);
+                  // g_strstr_len needle is arg2; all others use arg1
+                *Str2P = isGStrstrLen ? callInst->getArgOperand(2)
+                                      : callInst->getArgOperand(1);
             std::string Str1, Str2;
             StringRef   TmpStr;
             bool        HasStr1 = getConstantStringInfo(Str1P, TmpStr);
@@ -1117,8 +1165,9 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
 
     if (map_addr) {
 
-      GlobalVariable *AFLMapAddrFixed = new GlobalVariable(
-          M, Int64Tyi, true, GlobalValue::ExternalLinkage, 0, "__afl_map_addr");
+      GlobalVariable *AFLMapAddrFixed =
+          new GlobalVariable(M, Int64Tyi, false, GlobalValue::ExternalLinkage,
+                             0, "__afl_map_addr");
       ConstantInt *MapAddr = ConstantInt::get(Int64Tyi, map_addr);
       StoreInst   *StoreMapAddr = IRB.CreateStore(MapAddr, AFLMapAddrFixed);
       setNoSanitizeMetadata(StoreMapAddr);
@@ -1132,8 +1181,8 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
       write_loc = (((afl_global_id + 8) >> 3) << 3);
 
       GlobalVariable *AFLFinalLoc =
-          new GlobalVariable(M, Int32Tyi, true, GlobalValue::ExternalLinkage, 0,
-                             "__afl_final_loc");
+          new GlobalVariable(M, Int32Tyi, false, GlobalValue::ExternalLinkage,
+                             0, "__afl_final_loc");
       ConstantInt *const_loc = ConstantInt::get(Int32Tyi, write_loc);
       StoreInst   *StoreFinalLoc = IRB.CreateStore(const_loc, AFLFinalLoc);
       setNoSanitizeMetadata(StoreFinalLoc);
@@ -1187,13 +1236,12 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
         setNoSanitizeMetadata(StoreDictLen);
 
         ArrayType *ArrayTy = ArrayType::get(IntegerType::get(Ctx, 8), offset);
+        ArrayRef<char>  DictData(ptrhld.get(), offset);
         GlobalVariable *AFLInternalDictionary = new GlobalVariable(
             M, ArrayTy, true, GlobalValue::ExternalLinkage,
-            ConstantDataArray::get(Ctx,
-                                   *(new ArrayRef<char>(ptrhld.get(), offset))),
-            "__afl_internal_dictionary");
-        AFLInternalDictionary->setInitializer(ConstantDataArray::get(
-            Ctx, *(new ArrayRef<char>(ptrhld.get(), offset))));
+            ConstantDataArray::get(Ctx, DictData), "__afl_internal_dictionary");
+        AFLInternalDictionary->setInitializer(
+            ConstantDataArray::get(Ctx, DictData));
         AFLInternalDictionary->setConstant(true);
 
         GlobalVariable *AFLDictionary =
@@ -1351,12 +1399,7 @@ u32 countCallers(Function *F) {
 
   for (auto *U : F->users()) {
 
-    if (auto *CI = dyn_cast<CallInst>(U)) {
-
-      ++callers;
-      (void)(CI);
-
-    }
+    if (isa<CallInst>(U) || isa<InvokeInst>(U)) { ++callers; }
 
   }
 
@@ -1373,11 +1416,11 @@ Function *returnOnlyCaller(Function *F) {
 
   for (auto *U : F->users()) {
 
-    if (auto *CI = dyn_cast<CallInst>(U)) {
+    if (auto *CB = dyn_cast<CallBase>(U)) {
 
       if (caller == NULL) {
 
-        caller = CI->getParent()->getParent();
+        caller = CB->getParent()->getParent();
 
       } else {
 
@@ -1517,11 +1560,14 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
       ++call_depth;
 
+      // returnOnlyCaller() returns non-NULL only when callee has exactly
+      // one caller, so the loop walks up the chain through single-caller
+      // functions and stops at the first ancestor with !=1 callers or
+      // when the depth budget is exhausted.
       while (instrument_ctx_max_depth >= call_depth &&
-             ((caller = returnOnlyCaller(callee)) || 1 == 1) &&
-             (call_counter = countCallers(callee)) == 1) {
+             (caller = returnOnlyCaller(callee)) != NULL) {
 
-        if (debug && caller && callee)
+        if (debug)
           fprintf(stderr, "DEBUG: another depth: %s <- %s [%u]\n",
                   callee->getName().str().c_str(),
                   caller->getName().str().c_str(), call_depth);
@@ -1530,15 +1576,19 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
       }
 
-      if (!caller && callee) {
+      if (!caller && callee) { caller = callee; }
 
-        caller = callee;
-        if (debug)
-          fprintf(stderr, "DEBUG: depth found: %s <- %s [count=%u, depth=%u]\n",
-                  caller->getName().str().c_str(), F.getName().str().c_str(),
-                  call_counter, call_depth);
+      // Refresh call_counter for the function we actually landed on; on
+      // depth-limit exit it would otherwise still hold the previous
+      // ancestor's count (always 1, which is what allowed us to keep
+      // walking), causing the call_counter==1 reset below to wipe a
+      // perfectly good multi-caller ancestor.
+      if (caller) call_counter = countCallers(caller);
 
-      }
+      if (debug)
+        fprintf(stderr, "DEBUG: depth found: %s <- %s [count=%u, depth=%u]\n",
+                caller ? caller->getName().str().c_str() : "(null)",
+                F.getName().str().c_str(), call_counter, call_depth);
 
     }
 
@@ -1611,6 +1661,13 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
                 inst += elements * 2;
 
               }
+
+            } else
+
+                if (t->getTypeID() == llvm::Type::ScalableVectorTyID) {
+
+              // Scalable vectors: OR-reduce to scalar at instrumentation time
+              inst += 2;
 
             } else
 
@@ -1745,6 +1802,7 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
             if (auto callInst = dyn_cast<CallInst>(&IN)) {
 
               Function *Callee = callInst->getCalledFunction();
+              if (!Callee) continue;
               if (Callee->isIntrinsic()) continue;
               if (countCallers(Callee) == 1) {
 
@@ -1807,22 +1865,45 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
   auto updateBitmapForResult = [&](IRBuilder<> &IRB, Value *Result,
                                    uint32_t vector_cnt) {
 
+    Value *EffMapPtr = HoistedMapPtr;
+    if (!EffMapPtr) {
+
+      auto *L = IRB.CreateLoad(PtrTy, AFLMapPtr);
+      setNoSanitizeMetadata(L);
+      EffMapPtr = L;
+
+    }
+
     uint32_t vector_cur = 0;
 
     while (1) {
 
       Value *MapPtrIdx = nullptr;
+      Value *CoverageIndex = nullptr;
 
       if (!vector_cnt) {
 
-        MapPtrIdx = IRB.CreateGEP(Int8Ty, HoistedMapPtr, Result);
+        CoverageIndex = Result;
 
       } else {
 
-        auto element = IRB.CreateExtractElement(Result, vector_cur++);
-        MapPtrIdx = IRB.CreateGEP(Int8Ty, HoistedMapPtr, element);
+        CoverageIndex = IRB.CreateExtractElement(Result, vector_cur++);
 
       }
+
+      // Apply IJON state-aware coverage if enabled
+      if (ijon_enabled && AFLIJONState) {
+
+        LoadInst *IJONStateVal = IRB.CreateLoad(Int32Tyi, AFLIJONState);
+        setNoSanitizeMetadata(IJONStateVal);
+        Value    *XorResult = IRB.CreateXor(IJONStateVal, CoverageIndex);
+        LoadInst *CovMapSize = IRB.CreateLoad(Int32Tyi, AFLCovMapSize);
+        setNoSanitizeMetadata(CovMapSize);
+        CoverageIndex = IRB.CreateURem(XorResult, CovMapSize);
+
+      }
+
+      MapPtrIdx = IRB.CreateGEP(Int8Ty, EffMapPtr, CoverageIndex);
 
       if (use_threadsafe_counters) {
 
@@ -1863,14 +1944,52 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
      because updateBitmapForResult uses it.  InjectCoverage (called later)
      will reuse the same value.
      hoistMapPointerLoad inserts a new entry block (preamble) — never
-     instrument that block with code that uses HoistedMapPtr. */
+     instrument that block with code that uses HoistedMapPtr.
+     IMPORTANT: do NOT hoist for coroutines.  This pass runs before
+     CoroSplitPass.  A hoisted load that is used across suspend points gets
+     spilled into the coroutine frame; in the .destroy path the frame is
+     freed first and the spilled value is then read from freed memory →
+     heap-use-after-free. */
   if (map_addr) {
 
     HoistedMapPtr = MapPtrFixed;
 
   } else {
 
-    HoistedMapPtr = hoistMapPointerLoad(F, AFLMapPtr, PtrTy);
+    bool isCoro = false;
+    for (auto &BB : F) {
+
+      for (auto &I : BB) {
+
+        if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+
+          auto iid = II->getIntrinsicID();
+          if (iid == Intrinsic::coro_id || iid == Intrinsic::coro_id_retcon ||
+              iid == Intrinsic::coro_id_retcon_once ||
+              iid == Intrinsic::coro_id_async) {
+
+            isCoro = true;
+            break;
+
+          }
+
+        }
+
+      }
+
+      if (isCoro) break;
+
+    }
+
+    if (!isCoro) {
+
+      HoistedMapPtr = hoistMapPointerLoad(F, AFLMapPtr, PtrTy);
+
+    } else {
+
+      HoistedMapPtr = NULL;
+
+    }
 
   }
 
@@ -1940,11 +2059,13 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
         if (t->getTypeID() == llvm::Type::IntegerTyID) {
 
+          Value *frozen_cond = IRB.CreateFreeze(condition);
+          markAflSkip(frozen_cond);
           Value *val1 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
           Value *val2 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
-          result = IRB.CreateSelect(condition, val1, val2);
+          result = IRB.CreateSelect(frozen_cond, val1, val2);
           inst += 2;
 
         } else
@@ -1986,11 +2107,30 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
               }
 
-              result = IRB.CreateSelect(condition, x, y);
+              Value *frozen_cond = IRB.CreateFreeze(condition);
+              markAflSkip(frozen_cond);
+              result = IRB.CreateSelect(frozen_cond, x, y);
 
             }
 
           }
+
+        } else
+
+            if (t->getTypeID() == llvm::Type::ScalableVectorTyID) {
+
+          // Scalable vectors (SVE/RISC-V V): OR-reduce to scalar i1
+          // since the vector length is runtime-dependent.
+          Value *frozen_cond = IRB.CreateFreeze(condition);
+          markAflSkip(frozen_cond);
+          Value *reduced = IRB.CreateOrReduce(frozen_cond);
+          markAflSkip(reduced);
+          Value *val1 =
+              applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
+          Value *val2 =
+              applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
+          result = IRB.CreateSelect(reduced, val1, val2);
+          inst += 2;
 
         } else
 
@@ -2017,11 +2157,13 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
           if (!icmp->getType()->isIntegerTy(1)) continue;
 
+          Value *res = IRB.CreateFreeze(icmp);
+          markAflSkip(res);
           Value *val1 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
           Value *val2 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
-          result = IRB.CreateSelect(icmp, val1, val2);
+          result = IRB.CreateSelect(res, val1, val2);
           markAflSkip(result);
           inst += 2;
 
@@ -2029,17 +2171,21 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
           if (!fcmp->getType()->isIntegerTy(1)) continue;
 
+          Value *res = IRB.CreateFreeze(fcmp);
+          markAflSkip(res);
           Value *val1 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
           Value *val2 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
-          result = IRB.CreateSelect(fcmp, val1, val2);
+          result = IRB.CreateSelect(res, val1, val2);
           markAflSkip(result);
           inst += 2;
 
         } else if (auto *cxchg = dyn_cast<AtomicCmpXchgInst>(&IN)) {
 
-          Value *res = IRB.CreateExtractValue(cxchg, 1);
+          Value *extracted = IRB.CreateExtractValue(cxchg, 1);
+          markAflSkip(extracted);
+          Value *res = IRB.CreateFreeze(extracted);
           markAflSkip(res);
           Value *val1 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
@@ -2096,7 +2242,9 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
           }
 
-          Value *res = IRB.CreateICmp(Pred, NewVal, OldVal, "rmw.cov");
+          Value *cmp = IRB.CreateICmp(Pred, NewVal, OldVal, "rmw.cov");
+          markAflSkip(cmp);
+          Value *res = IRB.CreateFreeze(cmp);
           markAflSkip(res);
           Value *val1 =
               applyCtxOffset(IRB, ConstantInt::get(Int32Ty, ++afl_global_id));
@@ -2118,7 +2266,7 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
 
     }
 
-    if (!instrument_ctx)
+    if (!instrument_ctx || call_counter <= 1)
       if (shouldInstrumentBlock(F, &BB, DT, PDT, Options))
         BlocksToInstrument.push_back(&BB);
 
@@ -2337,7 +2485,16 @@ void ModuleSanitizerCoverageLTO::InjectCoverageAtBlock(Function   &F,
 
     /* GEP into the SHM map (pointer loaded once in preamble) */
 
-    Value *MapPtrIdx = IRB.CreateGEP(Int8Ty, HoistedMapPtr, val);
+    Value *EffMapPtr = HoistedMapPtr;
+    if (!EffMapPtr) {
+
+      auto *L = IRB.CreateLoad(PtrTy, AFLMapPtr);
+      setNoSanitizeMetadata(L);
+      EffMapPtr = L;
+
+    }
+
+    Value *MapPtrIdx = IRB.CreateGEP(Int8Ty, EffMapPtr, val);
 
     /* Update bitmap */
     if (use_threadsafe_counters) {                                /* Atomic */
