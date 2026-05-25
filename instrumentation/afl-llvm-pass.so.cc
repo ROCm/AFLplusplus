@@ -942,8 +942,8 @@ size_t AFLCoverage::instrumentIsel(Module &M) {
     /// TODO: Demangle the name to make sure it's
     /// SelectionDAGISel::SelectCodeCommon() in the future.
 
-    if (F.getName() ==
-        "_ZN4llvm16SelectionDAGISel16SelectCodeCommonEPNS_6SDNodeEPKhj") {
+    if (F.getName().starts_with(
+            "_ZN4llvm16SelectionDAGISel16SelectCodeCommonE")) {
       size_t ret = instrumentMatcherTable(M, F, F.getArg(2));
       assert(ret);
       return ret;
